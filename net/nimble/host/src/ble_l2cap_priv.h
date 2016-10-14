@@ -44,20 +44,16 @@ extern STATS_SECT_DECL(ble_l2cap_stats) ble_l2cap_stats;
 
 extern struct os_mempool ble_l2cap_chan_pool;
 
-#define BLE_L2CAP_CID_ATT           4
-#define BLE_L2CAP_CID_SIG           5
-#define BLE_L2CAP_CID_SM            6
-
-/* This is nimble specific; packets sent to the black hole CID do not elicit
- * an "invalid CID" response.
- */
-#define BLE_L2CAP_CID_BLACK_HOLE    0xffff
+#define BLE_L2CAP_CID_ATT   4
+#define BLE_L2CAP_CID_SIG   5
+#define BLE_L2CAP_CID_SM    6
 
 #define BLE_L2CAP_HDR_SZ    4
 
 typedef uint8_t ble_l2cap_chan_flags;
 
-typedef int ble_l2cap_rx_fn(uint16_t conn_handle, struct os_mbuf **rxom);
+typedef int ble_l2cap_rx_fn(uint16_t conn_handle,
+                            struct os_mbuf **om);
 
 struct ble_l2cap_chan {
     SLIST_ENTRY(ble_l2cap_chan) blc_next;
@@ -93,7 +89,7 @@ struct os_mbuf *ble_l2cap_prepend_hdr(struct os_mbuf *om, uint16_t cid,
 struct ble_l2cap_chan *ble_l2cap_chan_alloc(void);
 void ble_l2cap_chan_free(struct ble_l2cap_chan *chan);
 
-uint16_t ble_l2cap_chan_mtu(const struct ble_l2cap_chan *chan);
+uint16_t ble_l2cap_chan_mtu(struct ble_l2cap_chan *chan);
 
 
 int ble_l2cap_rx(struct ble_hs_conn *conn,
@@ -102,7 +98,7 @@ int ble_l2cap_rx(struct ble_hs_conn *conn,
                  ble_l2cap_rx_fn **out_rx_cb,
                  struct os_mbuf **out_rx_buf);
 int ble_l2cap_tx(struct ble_hs_conn *conn, struct ble_l2cap_chan *chan,
-                 struct os_mbuf *txom);
+                 struct os_mbuf *om);
 
 int ble_l2cap_init(void);
 

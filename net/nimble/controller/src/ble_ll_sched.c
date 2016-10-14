@@ -32,10 +32,6 @@
 /* XXX: this is temporary. Not sure what I want to do here */
 struct cpu_timer g_ble_ll_sched_timer;
 
-#if (BLE_LL_SCHED_DEBUG == 1)
-int32_t g_ble_ll_sched_max_late;
-#endif
-
 /* XXX: TODO:
  *  1) Add some accounting to the schedule code to see how late we are
  *  (min/max?)
@@ -649,7 +645,6 @@ ble_ll_sched_execute_item(struct ble_ll_sched_item *sch)
         } else {
             STATS_INC(ble_ll_stats, sched_state_conn_errs);
             ble_ll_conn_event_halt();
-            return -1;
         }
     }
 
@@ -668,19 +663,12 @@ ble_ll_sched_execute_item(struct ble_ll_sched_item *sch)
 void
 ble_ll_sched_run(void *arg)
 {
-    int32_t dt;
     struct ble_ll_sched_item *sch;
 
     /* Look through schedule queue */
     while ((sch = TAILQ_FIRST(&g_ble_ll_sched_q)) != NULL) {
         /* Make sure we have passed the start time of the first event */
-        dt = (int32_t)(cputime_get32() - sch->start_time);
-        if (dt >= 0) {
-#if (BLE_LL_SCHED_DEBUG == 1)
-            if (dt > g_ble_ll_sched_max_late) {
-                g_ble_ll_sched_max_late = dt;
-            }
-#endif
+        if ((int32_t)(cputime_get32() - sch->start_time) >= 0) {
             /* Remove schedule item and execute the callback */
             TAILQ_REMOVE(&g_ble_ll_sched_q, sch, link);
             sch->enqueued = 0;

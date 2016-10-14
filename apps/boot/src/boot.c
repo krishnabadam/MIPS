@@ -23,16 +23,13 @@
 #include <hal/flash_map.h>
 #include <os/os.h>
 #include <bsp/bsp.h>
-#include <hal/hal_bsp.h>
 #include <hal/hal_system.h>
 #include <hal/hal_flash.h>
+#include <log/log.h>
 #include <config/config.h>
 #include <config/config_file.h>
-#ifdef BOOT_SERIAL
-#include <hal/hal_gpio.h>
-#include <boot_serial/boot_serial.h>
-#endif
-#include <console/console.h>
+#include "fs/fs.h"
+#include "nffs/nffs.h"
 #include "bootutil/image.h"
 #include "bootutil/loader.h"
 #include "bootutil/bootutil_misc.h"
@@ -42,20 +39,17 @@
 #define BOOT_AREA_DESC_MAX  (256)
 #define AREA_DESC_MAX       (BOOT_AREA_DESC_MAX)
 
-#ifdef BOOT_SERIAL
-#define BOOT_SER_PRIO_TASK          1
-#define BOOT_SER_STACK_SZ           512
-#define BOOT_SER_CONS_INPUT         128
+#define MY_CONFIG_FILE "/cfg/run"
 
-static struct os_task boot_ser_task;
-static os_stack_t boot_ser_stack[BOOT_SER_STACK_SZ];
-#endif
+static struct conf_file my_conf = {
+    .cf_name = MY_CONFIG_FILE
+};
 
 int
 main(void)
 {
+    struct nffs_area_desc nffs_descs[NFFS_AREA_MAX + 1];
     struct flash_area descs[AREA_DESC_MAX];
-    const struct flash_area *fap;
     /** Areas representing the beginning of image slots. */
     uint8_t img_starts[2];
     int cnt;
@@ -67,11 +61,7 @@ main(void)
         .br_slot_areas = img_starts,
     };
 
-#ifdef BOOT_SERIAL
     os_init();
-#else
-    bsp_init();
-#endif
 
     rc = hal_flash_init();
     assert(rc == 0);
@@ -80,9 +70,6 @@ main(void)
     rc = flash_area_to_sectors(FLASH_AREA_IMAGE_0, &cnt, descs);
     img_starts[0] = 0;
     total = cnt;
-
-    flash_area_open(FLASH_AREA_IMAGE_0, &fap);
-    req.br_img_sz = fap->fa_size;
 
     cnt = BOOT_AREA_DESC_MAX - total;
     assert(cnt >= 0);
@@ -100,25 +87,37 @@ main(void)
 
     req.br_num_image_areas = total;
 
+    /*
+     * Make sure we have enough left to initialize the NFFS with the
+     * right number of maximum areas otherwise the file-system will not
+     * be readable.
+     */
+    cnt = NFFS_AREA_MAX;
+    rc = flash_area_to_nffs_desc(FLASH_AREA_NFFS, &cnt, nffs_descs);
+    assert(rc == 0);
+
+    /*
+     * Initializes the flash driver and file system for use by the boot loader.
+     */
+    rc = nffs_init();
+    if (rc == 0) {
+        /* Look for an nffs file system in internal flash.  If no file
+         * system gets detected, all subsequent file operations will fail,
+         * but the boot loader should proceed anyway.
+         */
+        nffs_detect(nffs_descs);
+    }
+
     conf_init();
 
-#ifdef BOOT_SERIAL
-    /*
-     * Configure a GPIO as input, and compare it against expected value.
-     * If it matches, await for download commands from serial.
-     */
-    hal_gpio_init_in(BOOT_SERIAL_DETECT_PIN, BOOT_SERIAL_DETECT_PIN_CFG);
-    if (hal_gpio_read(BOOT_SERIAL_DETECT_PIN) == BOOT_SERIAL_DETECT_PIN_VAL) {
-        rc = boot_serial_task_init(&boot_ser_task, BOOT_SER_PRIO_TASK,
-          boot_ser_stack, BOOT_SER_STACK_SZ, BOOT_SER_CONS_INPUT);
-        assert(rc == 0);
-        os_start();
-    }
-#endif
+    rc = conf_file_src(&my_conf);
+    assert(rc == 0);
+    rc = conf_file_dst(&my_conf);
+    assert(rc == 0);
+    bootutil_cfg_register();
+
     rc = boot_go(&req, &rsp);
     assert(rc == 0);
-    console_blocking_mode();
-    console_printf("\nboot_go = %d\n", rc);
 
     system_start((void *)(rsp.br_image_addr + rsp.br_hdr->ih_hdr_size));
 

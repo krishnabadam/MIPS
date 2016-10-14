@@ -21,13 +21,18 @@
 #include "os/os.h"
 #include "testutil/testutil.h"
 #include "nimble/hci_common.h"
-#include "nimble/ble_hci_trans.h"
+#include "nimble/hci_transport.h"
 #include "host/ble_hs_test.h"
 #include "host/ble_gap.h"
 #include "ble_hs_test_util.h"
 
+#ifdef ARCH_sim
+#define BLE_OS_TEST_STACK_SIZE      1024
+#define BLE_OS_TEST_APP_STACK_SIZE  1024
+#else
 #define BLE_OS_TEST_STACK_SIZE      256
 #define BLE_OS_TEST_APP_STACK_SIZE  256
+#endif
 
 #define BLE_OS_TEST_APP_PRIO         9
 #define BLE_OS_TEST_TASK_PRIO        10
@@ -42,8 +47,6 @@ ble_os_test_app_stack[OS_STACK_ALIGN(BLE_OS_TEST_APP_STACK_SIZE)];
 static uint8_t ble_os_test_peer_addr[6] = { 1, 2, 3, 4, 5, 6 };
 
 static void ble_os_test_app_task_handler(void *arg);
-
-static int ble_os_test_gap_event_type;
 
 static void
 ble_os_test_init_app_task(void)
@@ -91,23 +94,20 @@ ble_os_test_misc_conn_exists(uint16_t conn_handle)
 }
 
 static int
-ble_gap_direct_connect_test_connect_cb(struct ble_gap_event *event, void *arg)
+ble_gap_direct_connect_test_connect_cb(int event, int status,
+                                       struct ble_gap_conn_ctxt *ctxt,
+                                       void *arg)
 {
-    struct ble_gap_conn_desc desc;
     int *cb_called;
-    int rc;
 
     cb_called = arg;
     *cb_called = 1;
 
-    TEST_ASSERT(event->type == BLE_GAP_EVENT_CONNECT);
-    TEST_ASSERT(event->connect.status == 0);
-    TEST_ASSERT(event->connect.conn_handle == 2);
-
-    rc = ble_gap_conn_find(event->connect.conn_handle, &desc);
-    TEST_ASSERT_FATAL(rc == 0);
-    TEST_ASSERT(desc.peer_id_addr_type == BLE_ADDR_TYPE_PUBLIC);
-    TEST_ASSERT(memcmp(desc.peer_id_addr, ble_os_test_peer_addr, 6) == 0);
+    TEST_ASSERT(event == BLE_GAP_EVENT_CONN);
+    TEST_ASSERT(status == 0);
+    TEST_ASSERT(ctxt->desc->conn_handle == 2);
+    TEST_ASSERT(ctxt->desc->peer_addr_type == BLE_ADDR_TYPE_PUBLIC);
+    TEST_ASSERT(memcmp(ctxt->desc->peer_addr, ble_os_test_peer_addr, 6) == 0);
 
     return 0;
 }
@@ -131,10 +131,9 @@ ble_gap_direct_connect_test_task_handler(void *arg)
     TEST_ASSERT(!ble_os_test_misc_conn_exists(BLE_HS_CONN_HANDLE_NONE));
 
     /* Initiate a direct connection. */
-    ble_hs_test_util_connect(BLE_ADDR_TYPE_PUBLIC, BLE_ADDR_TYPE_PUBLIC,
-                             addr, 0, NULL,
-                             ble_gap_direct_connect_test_connect_cb,
-                             &cb_called, 0);
+    ble_hs_test_util_conn_initiate(0, addr, NULL,
+                                   ble_gap_direct_connect_test_connect_cb,
+                                   &cb_called, 0);
     TEST_ASSERT(!ble_os_test_misc_conn_exists(BLE_HS_CONN_HANDLE_NONE));
     TEST_ASSERT(!cb_called);
 
@@ -167,23 +166,22 @@ TEST_CASE(ble_gap_direct_connect_test_case)
     os_start();
 }
 
-static int
-ble_os_disc_test_cb(struct ble_gap_event *event, void *arg)
+static void
+ble_gap_gen_disc_test_connect_cb(int event, int status,
+                                 struct ble_gap_disc_desc *desc, void *arg)
 {
     int *cb_called;
 
     cb_called = arg;
     *cb_called = 1;
 
-    TEST_ASSERT(event->type == BLE_GAP_EVENT_DISC_COMPLETE);
-
-    return 0;
+    TEST_ASSERT(event == BLE_GAP_EVENT_DISC_FINISHED);
+    TEST_ASSERT(status == 0);
 }
 
 static void
-ble_os_disc_test_task_handler(void *arg)
+ble_gap_gen_disc_test_task_handler(void *arg)
 {
-    struct ble_gap_disc_params disc_params;
     int cb_called;
     int rc;
 
@@ -203,10 +201,11 @@ ble_os_disc_test_task_handler(void *arg)
     TEST_ASSERT(!ble_os_test_misc_conn_exists(BLE_HS_CONN_HANDLE_NONE));
     TEST_ASSERT(!ble_gap_master_in_progress());
 
-    /* Initiate the general discovery procedure with a 300 ms timeout. */
-    memset(&disc_params, 0, sizeof disc_params);
-    rc = ble_hs_test_util_disc(BLE_ADDR_TYPE_PUBLIC, 300, &disc_params,
-                               ble_os_disc_test_cb,
+    /* Initiate the general discovery procedure with a 200 ms timeout. */
+    rc = ble_hs_test_util_disc(300, BLE_GAP_DISC_MODE_GEN,
+                               BLE_HCI_SCAN_TYPE_ACTIVE,
+                               BLE_HCI_SCAN_FILT_NO_WL,
+                               ble_gap_gen_disc_test_connect_cb,
                                &cb_called, 0, 0);
     TEST_ASSERT(rc == 0);
     TEST_ASSERT(!ble_os_test_misc_conn_exists(BLE_HS_CONN_HANDLE_NONE));
@@ -225,8 +224,7 @@ ble_os_disc_test_task_handler(void *arg)
     TEST_ASSERT(!cb_called);
 
     ble_hs_test_util_set_ack(
-        ble_hs_hci_util_opcode_join(BLE_HCI_OGF_LE,
-                                    BLE_HCI_OCF_LE_SET_SCAN_ENABLE),
+        host_hci_opcode_join(BLE_HCI_OGF_LE, BLE_HCI_OCF_LE_SET_SCAN_ENABLE),
         0);
 
     /* Wait 250 more ms; verify scan completed. */
@@ -238,13 +236,13 @@ ble_os_disc_test_task_handler(void *arg)
     tu_restart();
 }
 
-TEST_CASE(ble_os_disc_test_case)
+TEST_CASE(ble_gap_gen_disc_test_case)
 {
     ble_os_test_misc_init();
 
     os_task_init(&ble_os_test_task,
-                 "ble_os_disc_test_task",
-                 ble_os_disc_test_task_handler, NULL,
+                 "ble_gap_gen_disc_test_task",
+                 ble_gap_gen_disc_test_task_handler, NULL,
                  BLE_OS_TEST_TASK_PRIO, OS_WAIT_FOREVER, ble_os_test_stack,
                  OS_STACK_ALIGN(BLE_OS_TEST_STACK_SIZE));
 
@@ -252,16 +250,18 @@ TEST_CASE(ble_os_disc_test_case)
 }
 
 static int
-ble_gap_terminate_cb(struct ble_gap_event *event, void *arg)
+ble_gap_terminate_cb(int event, int status,
+                     struct ble_gap_conn_ctxt *ctxt, void *arg)
 {
     int *disconn_handle;
 
-    ble_os_test_gap_event_type = event->type;
-
-    if (event->type == BLE_GAP_EVENT_DISCONNECT) {
-        disconn_handle = arg;
-        *disconn_handle = event->disconnect.conn.conn_handle;
+    TEST_ASSERT_FATAL(event == BLE_GAP_EVENT_CONN);
+    if (status == 0) {
+        return 0;
     }
+
+    disconn_handle = arg;
+    *disconn_handle = ctxt->desc->conn_handle;
 
     return 0;
 }
@@ -294,9 +294,8 @@ ble_gap_terminate_test_task_handler(void *arg)
     TEST_ASSERT(!ble_gap_master_in_progress());
 
     /* Create two direct connections. */
-    ble_hs_test_util_connect(BLE_ADDR_TYPE_PUBLIC, BLE_ADDR_TYPE_PUBLIC,
-                             addr1, 0, NULL, ble_gap_terminate_cb,
-                             &disconn_handle, 0);
+    ble_hs_test_util_conn_initiate(0, addr1, NULL, ble_gap_terminate_cb,
+                                   &disconn_handle, 0);
     memset(&conn_evt, 0, sizeof conn_evt);
     conn_evt.subevent_code = BLE_HCI_LE_SUBEV_CONN_COMPLETE;
     conn_evt.status = BLE_ERR_SUCCESS;
@@ -305,9 +304,8 @@ ble_gap_terminate_test_task_handler(void *arg)
     rc = ble_gap_rx_conn_complete(&conn_evt);
     TEST_ASSERT(rc == 0);
 
-    ble_hs_test_util_connect(BLE_ADDR_TYPE_PUBLIC, BLE_ADDR_TYPE_PUBLIC,
-                             addr2, 0, NULL, ble_gap_terminate_cb,
-                             &disconn_handle, 0);
+    ble_hs_test_util_conn_initiate(0, addr2, NULL, ble_gap_terminate_cb,
+                                   &disconn_handle, 0);
     memset(&conn_evt, 0, sizeof conn_evt);
     conn_evt.subevent_code = BLE_HCI_LE_SUBEV_CONN_COMPLETE;
     conn_evt.status = BLE_ERR_SUCCESS;
@@ -326,7 +324,6 @@ ble_gap_terminate_test_task_handler(void *arg)
     disconn_evt.status = 0;
     disconn_evt.reason = BLE_ERR_REM_USER_CONN_TERM;
     ble_hs_test_util_rx_disconn_complete_event(&disconn_evt);
-    TEST_ASSERT(ble_os_test_gap_event_type == BLE_GAP_EVENT_DISCONNECT);
     TEST_ASSERT(disconn_handle == 1);
     TEST_ASSERT_FATAL(!ble_os_test_misc_conn_exists(1));
     TEST_ASSERT_FATAL(ble_os_test_misc_conn_exists(2));
@@ -338,7 +335,6 @@ ble_gap_terminate_test_task_handler(void *arg)
     disconn_evt.status = 0;
     disconn_evt.reason = BLE_ERR_REM_USER_CONN_TERM;
     ble_hs_test_util_rx_disconn_complete_event(&disconn_evt);
-    TEST_ASSERT(ble_os_test_gap_event_type == BLE_GAP_EVENT_DISCONNECT);
     TEST_ASSERT(disconn_handle == 2);
     TEST_ASSERT_FATAL(!ble_os_test_misc_conn_exists(1));
     TEST_ASSERT_FATAL(!ble_os_test_misc_conn_exists(2));
@@ -386,9 +382,7 @@ TEST_CASE(ble_gap_terminate_test_case)
 
 TEST_SUITE(ble_os_test_suite)
 {
-    tu_suite_set_post_test_cb(ble_hs_test_util_post_test, NULL);
-
-    ble_os_disc_test_case();
+    ble_gap_gen_disc_test_case();
     ble_gap_direct_connect_test_case();
     ble_gap_terminate_test_case();
 }

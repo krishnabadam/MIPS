@@ -32,7 +32,7 @@
 #define BLE_LL_CTRL_PROC_VERSION_XCHG   (4)
 #define BLE_LL_CTRL_PROC_TERMINATE      (5)
 #define BLE_LL_CTRL_PROC_CONN_PARAM_REQ (6)
-#define BLE_LL_CTRL_PROC_LE_PING        (7)
+#define BLE_LL_CRTL_PROC_LE_PING        (7)
 #define BLE_LL_CTRL_PROC_DATA_LEN_UPD   (8)
 #define BLE_LL_CTRL_PROC_NUM            (9)
 #define BLE_LL_CTRL_PROC_IDLE           (255)
@@ -244,9 +244,6 @@ void ble_ll_hci_ev_rd_rem_used_feat(struct ble_ll_conn_sm *connsm,
 void ble_ll_hci_ev_rd_rem_ver(struct ble_ll_conn_sm *connsm, uint8_t status);
 void ble_ll_hci_ev_encrypt_chg(struct ble_ll_conn_sm *connsm, uint8_t status);
 int ble_ll_hci_ev_ltk_req(struct ble_ll_conn_sm *connsm);
-int ble_ll_hci_ev_hw_err(uint8_t hw_err);
-void ble_ll_hci_ev_databuf_overflow(void);
-
 
 void ble_ll_calc_session_key(struct ble_ll_conn_sm *connsm);
 

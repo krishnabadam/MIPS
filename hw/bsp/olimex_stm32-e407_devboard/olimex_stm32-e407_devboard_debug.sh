@@ -23,6 +23,7 @@
 #  - identities is the project identities string.
 # 
 #
+set -x
 if [ $# -lt 2 ]; then
     echo "Need binary to debug"
     exit 1

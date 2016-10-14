@@ -20,7 +20,7 @@
 #include <string.h>
 #include <errno.h>
 #include "os/os.h"
-#include "host/ble_hs_id.h"
+#include "host/host_hci.h"
 #include "ble_hs_priv.h"
 
 /** At least three channels required per connection (sig, att, sm). */
@@ -30,8 +30,6 @@ static SLIST_HEAD(, ble_hs_conn) ble_hs_conns;
 static struct os_mempool ble_hs_conn_pool;
 
 static os_membuf_t *ble_hs_conn_elem_mem;
-
-static const uint8_t ble_hs_conn_null_addr[6];
 
 int
 ble_hs_conn_can_alloc(void)
@@ -138,7 +136,7 @@ ble_hs_conn_alloc(void)
      * to reject SM messages.
      */
 #if NIMBLE_OPT(SM)
-    chan = ble_sm_create_chan();
+    chan = ble_l2cap_sm_create_chan();
     if (chan == NULL) {
         goto err;
     }
@@ -187,6 +185,8 @@ ble_hs_conn_free(struct ble_hs_conn *conn)
         return;
     }
 
+    ble_gatts_conn_deinit(&conn->bhc_gatt_svr);
+
     ble_att_svr_prep_clear(&conn->bhc_att_svr.basc_prep_list);
 
     while ((chan = SLIST_FIRST(&conn->bhc_channels)) != NULL) {
@@ -206,7 +206,7 @@ ble_hs_conn_insert(struct ble_hs_conn *conn)
     return;
 #endif
 
-    BLE_HS_DBG_ASSERT(ble_hs_locked_by_cur_task());
+    BLE_HS_DBG_ASSERT(ble_hs_thread_safe());
 
     BLE_HS_DBG_ASSERT_EVAL(ble_hs_conn_find(conn->bhc_handle) == NULL);
     SLIST_INSERT_HEAD(&ble_hs_conns, conn, bhc_next);
@@ -219,7 +219,7 @@ ble_hs_conn_remove(struct ble_hs_conn *conn)
     return;
 #endif
 
-    BLE_HS_DBG_ASSERT(ble_hs_locked_by_cur_task());
+    BLE_HS_DBG_ASSERT(ble_hs_thread_safe());
 
     SLIST_REMOVE(&ble_hs_conns, conn, ble_hs_conn, bhc_next);
 }
@@ -233,69 +233,12 @@ ble_hs_conn_find(uint16_t conn_handle)
 
     struct ble_hs_conn *conn;
 
-    BLE_HS_DBG_ASSERT(ble_hs_locked_by_cur_task());
+    BLE_HS_DBG_ASSERT(ble_hs_thread_safe());
 
     SLIST_FOREACH(conn, &ble_hs_conns, bhc_next) {
         if (conn->bhc_handle == conn_handle) {
             return conn;
         }
-    }
-
-    return NULL;
-}
-
-struct ble_hs_conn *
-ble_hs_conn_find_assert(uint16_t conn_handle)
-{
-    struct ble_hs_conn *conn;
-
-    conn = ble_hs_conn_find(conn_handle);
-    BLE_HS_DBG_ASSERT(conn != NULL);
-
-    return conn;
-}
-
-struct ble_hs_conn *
-ble_hs_conn_find_by_addr(uint8_t addr_type, uint8_t *addr)
-{
-#if !NIMBLE_OPT(CONNECT)
-    return NULL;
-#endif
-
-    struct ble_hs_conn *conn;
-
-    BLE_HS_DBG_ASSERT(ble_hs_locked_by_cur_task());
-
-    SLIST_FOREACH(conn, &ble_hs_conns, bhc_next) {
-        if (conn->bhc_peer_addr_type == addr_type &&
-            memcmp(conn->bhc_peer_addr, addr, 6) == 0) {
-
-            return conn;
-        }
-    }
-
-    return NULL;
-}
-
-struct ble_hs_conn *
-ble_hs_conn_find_by_idx(int idx)
-{
-#if !NIMBLE_OPT(CONNECT)
-    return NULL;
-#endif
-
-    struct ble_hs_conn *conn;
-    int i;
-
-    BLE_HS_DBG_ASSERT(ble_hs_locked_by_cur_task());
-
-    i = 0;
-    SLIST_FOREACH(conn, &ble_hs_conns, bhc_next) {
-        if (i == idx) {
-            return conn;
-        }
-
-        i++;
     }
 
     return NULL;
@@ -320,58 +263,8 @@ ble_hs_conn_first(void)
     return NULL;
 #endif
 
-    BLE_HS_DBG_ASSERT(ble_hs_locked_by_cur_task());
+    BLE_HS_DBG_ASSERT(ble_hs_thread_safe());
     return SLIST_FIRST(&ble_hs_conns);
-}
-
-void
-ble_hs_conn_addrs(const struct ble_hs_conn *conn,
-                  struct ble_hs_conn_addrs *addrs)
-{
-    int rc;
-
-    /* Determine our address information. */
-    addrs->our_id_addr_type =
-        ble_hs_misc_addr_type_to_id(conn->bhc_our_addr_type);
-    rc = ble_hs_id_addr(addrs->our_id_addr_type, &addrs->our_id_addr, NULL);
-    assert(rc == 0);
-
-    if (memcmp(conn->bhc_our_rpa_addr, ble_hs_conn_null_addr, 6) == 0) {
-        addrs->our_ota_addr_type = addrs->our_id_addr_type;
-        addrs->our_ota_addr = addrs->our_id_addr;
-    } else {
-        addrs->our_ota_addr_type = conn->bhc_our_addr_type;
-        addrs->our_ota_addr = conn->bhc_our_rpa_addr;
-    }
-
-    /* Determine peer address information. */
-    addrs->peer_ota_addr_type = conn->bhc_peer_addr_type;
-    addrs->peer_id_addr = conn->bhc_peer_addr;
-    switch (conn->bhc_peer_addr_type) {
-    case BLE_ADDR_TYPE_PUBLIC:
-        addrs->peer_id_addr_type = BLE_ADDR_TYPE_PUBLIC;
-        addrs->peer_ota_addr = conn->bhc_peer_addr;
-        break;
-
-    case BLE_ADDR_TYPE_RANDOM:
-        addrs->peer_id_addr_type = BLE_ADDR_TYPE_RANDOM;
-        addrs->peer_ota_addr = conn->bhc_peer_addr;
-        break;
-
-    case BLE_ADDR_TYPE_RPA_PUB_DEFAULT:
-        addrs->peer_id_addr_type = BLE_ADDR_TYPE_PUBLIC;
-        addrs->peer_ota_addr = conn->bhc_peer_rpa_addr;
-        break;
-
-    case BLE_ADDR_TYPE_RPA_RND_DEFAULT:
-        addrs->peer_id_addr_type = BLE_ADDR_TYPE_RANDOM;
-        addrs->peer_ota_addr = conn->bhc_peer_rpa_addr;
-        break;
-
-    default:
-        BLE_HS_DBG_ASSERT(0);
-        break;
-    }
 }
 
 static void

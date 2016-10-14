@@ -19,7 +19,6 @@
 
 #include "os/os.h"
 #include "os/queue.h"
-#include "os_priv.h"
 
 #include "hal/hal_os_tick.h"
 
@@ -105,9 +104,6 @@ void
 os_init(void)
 {
     os_error_t err;
-
-    TAILQ_INIT(&g_callout_list);
-    STAILQ_INIT(&g_os_task_list);
 
     err = os_arch_os_init();
     assert(err == OS_OK);

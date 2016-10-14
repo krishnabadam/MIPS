@@ -22,6 +22,7 @@
 #include "os/os.h"
 #include "nimble/ble.h"
 #include "nimble/hci_common.h"
+#include "host/host_hci.h"
 #include "ble_hs_priv.h"
 
 _Static_assert(sizeof (struct ble_l2cap_hdr) == BLE_L2CAP_HDR_SZ,
@@ -78,7 +79,7 @@ ble_l2cap_chan_free(struct ble_l2cap_chan *chan)
 }
 
 uint16_t
-ble_l2cap_chan_mtu(const struct ble_l2cap_chan *chan)
+ble_l2cap_chan_mtu(struct ble_l2cap_chan *chan)
 {
     uint16_t mtu;
 
@@ -123,7 +124,7 @@ ble_l2cap_prepend_hdr(struct os_mbuf *om, uint16_t cid, uint16_t len)
     htole16(&hdr.blh_len, len);
     htole16(&hdr.blh_cid, cid);
 
-    om = os_mbuf_prepend_pullup(om, sizeof hdr);
+    om = os_mbuf_prepend(om, sizeof hdr);
     if (om == NULL) {
         return NULL;
     }
@@ -208,21 +209,14 @@ ble_l2cap_rx(struct ble_hs_conn *conn,
 
         chan = ble_hs_conn_chan_find(conn, l2cap_hdr.blh_cid);
         if (chan == NULL) {
+            BLE_HS_LOG(DEBUG, "rx on unknown L2CAP channel: %d\n",
+                       l2cap_hdr.blh_cid);
             rc = BLE_HS_ENOENT;
 
-            /* Unsupported channel. If the target CID is the black hole
-             * channel, quietly drop the packet.  Otherwise, send an invalid
-             * CID response.
-             */
-            if (l2cap_hdr.blh_cid != BLE_L2CAP_CID_BLACK_HOLE) {
-                BLE_HS_LOG(DEBUG, "rx on unknown L2CAP channel: %d\n",
-                           l2cap_hdr.blh_cid);
-
-                chan = ble_hs_conn_chan_find(conn, BLE_L2CAP_CID_SIG);
-                if (chan != NULL) {
-                    ble_l2cap_sig_reject_invalid_cid_tx(conn, chan, 0, 0,
-                                                        l2cap_hdr.blh_cid);
-                }
+            chan = ble_hs_conn_chan_find(conn, BLE_L2CAP_CID_SIG);
+            if (chan != NULL) {
+                ble_l2cap_sig_reject_invalid_cid_tx(conn, chan, 0, 0,
+                                                    l2cap_hdr.blh_cid);
             }
             goto err;
         }
@@ -269,27 +263,36 @@ err:
  * mbuf is consumed, regardless of the outcome of the function call.
  * 
  * @param chan                  The L2CAP channel to transmit over.
- * @param txom                  The data to transmit.
+ * @param om                    The data to transmit.
  *
  * @return                      0 on success; nonzero on error.
  */
 int
 ble_l2cap_tx(struct ble_hs_conn *conn, struct ble_l2cap_chan *chan,
-             struct os_mbuf *txom)
+             struct os_mbuf *om)
 {
     int rc;
 
-    txom = ble_l2cap_prepend_hdr(txom, chan->blc_cid, OS_MBUF_PKTLEN(txom));
-    if (txom == NULL) {
-        return BLE_HS_ENOMEM;
+    om = ble_l2cap_prepend_hdr(om, chan->blc_cid, OS_MBUF_PKTLEN(om));
+    if (om == NULL) {
+        rc = BLE_HS_ENOMEM;
+        goto err;
     }
 
-    rc = ble_hs_hci_acl_tx(conn, txom);
+    BLE_HS_LOG(DEBUG, "ble_l2cap_tx(): ");
+    ble_hs_misc_log_mbuf(om);
+    BLE_HS_LOG(DEBUG, "\n");
+    rc = host_hci_data_tx(conn, om);
+    om = NULL;
     if (rc != 0) {
-        return rc;
+        goto err;
     }
 
     return 0;
+
+err:
+    os_mbuf_free_chain(om);
+    return rc;
 }
 
 static void
@@ -327,7 +330,7 @@ ble_l2cap_init(void)
         goto err;
     }
 
-    rc = ble_sm_init();
+    rc = ble_l2cap_sm_init();
     if (rc != 0) {
         goto err;
     }

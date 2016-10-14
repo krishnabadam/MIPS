@@ -25,29 +25,17 @@
 #include <log/log.h>
 #include <stats/stats.h>
 #include <config/config.h>
+#include <config/config_file.h>
 #include <hal/flash_map.h>
-#include <hal/hal_system.h>
-#ifdef NFFS_PRESENT
 #include <fs/fs.h>
 #include <nffs/nffs.h>
-#include <config/config_file.h>
-#elif FCB_PRESENT
-#include <fcb/fcb.h>
-#include <config/config_fcb.h>
-#else
-#error "Need NFFS or FCB for config storage"
-#endif
 #include <newtmgr/newtmgr.h>
-#include <bootutil/image.h>
 #include <bootutil/bootutil_misc.h>
 #include <imgmgr/imgmgr.h>
 #include <assert.h>
 #include <string.h>
 #include <json/json.h>
 #include <flash_test/flash_test.h>
-#include <reboot/log_reboot.h>
-#include <os/os_time.h>
-#include <id/id.h>
 
 #ifdef ARCH_sim
 #include <mcu/mcu_sim.h>
@@ -58,15 +46,15 @@ volatile int tasks_initialized;
 int init_tasks(void);
 
 /* Task 1 */
-#define TASK1_PRIO (8)
-#define TASK1_STACK_SIZE    OS_STACK_ALIGN(192)
+#define TASK1_PRIO (1)
+#define TASK1_STACK_SIZE    OS_STACK_ALIGN(128)
 #define MAX_CBMEM_BUF 600
 struct os_task task1;
 os_stack_t stack1[TASK1_STACK_SIZE];
 static volatile int g_task1_loops;
 
 /* Task 2 */
-#define TASK2_PRIO (9)
+#define TASK2_PRIO (2)
 #define TASK2_STACK_SIZE    OS_STACK_ALIGN(128)
 struct os_task task2;
 os_stack_t stack2[TASK2_STACK_SIZE];
@@ -77,7 +65,7 @@ os_stack_t stack2[TASK2_STACK_SIZE];
 os_stack_t shell_stack[SHELL_TASK_STACK_SIZE];
 
 #define NEWTMGR_TASK_PRIO (4)
-#define NEWTMGR_TASK_STACK_SIZE (OS_STACK_ALIGN(896))
+#define NEWTMGR_TASK_STACK_SIZE (OS_STACK_ALIGN(512))
 os_stack_t newtmgr_stack[NEWTMGR_TASK_STACK_SIZE];
 
 struct log_handler log_cbmem_handler;
@@ -91,34 +79,13 @@ struct os_sem g_test_sem;
 /* For LED toggling */
 int g_led_pin;
 
-STATS_SECT_START(gpio_stats)
-STATS_SECT_ENTRY(toggles)
-STATS_SECT_END
-
-STATS_SECT_DECL(gpio_stats) g_stats_gpio_toggle;
-
-STATS_NAME_START(gpio_stats)
-STATS_NAME(gpio_stats, toggles)
-STATS_NAME_END(gpio_stats)
-
-#ifdef NFFS_PRESENT
 /* configuration file */
 #define MY_CONFIG_DIR  "/cfg"
 #define MY_CONFIG_FILE "/cfg/run"
-#define MY_CONFIG_MAX_LINES  32
 
 static struct conf_file my_conf = {
-    .cf_name = MY_CONFIG_FILE,
-    .cf_maxlines = MY_CONFIG_MAX_LINES
+    .cf_name = MY_CONFIG_FILE
 };
-#elif FCB_PRESENT
-struct flash_area conf_fcb_area[NFFS_AREA_MAX + 1];
-
-static struct conf_fcb my_conf = {
-    .cf_fcb.f_magic = 0xc09f6e5e,
-    .cf_fcb.f_sectors = conf_fcb_area
-};
-#endif
 
 #define DEFAULT_MBUF_MPOOL_BUF_LEN (256)
 #define DEFAULT_MBUF_MPOOL_NBUFS (10)
@@ -132,8 +99,8 @@ struct os_mempool default_mbuf_mpool;
 static char *test_conf_get(int argc, char **argv, char *val, int max_len);
 static int test_conf_set(int argc, char **argv, char *val);
 static int test_conf_commit(void);
-static int test_conf_export(void (*export_func)(char *name, char *val),
-  enum conf_export_tgt tgt);
+static int test_conf_export(void (*export_func)(struct conf_handler *ch,
+        char *name, char *val));
 
 static struct conf_handler test_conf_handler = {
     .ch_name = "test",
@@ -184,13 +151,14 @@ test_conf_commit(void)
 }
 
 static int
-test_conf_export(void (*func)(char *name, char *val), enum conf_export_tgt tgt)
+test_conf_export(void (*func)(struct conf_handler *ch,
+        char *name, char *val))
 {
     char buf[4];
 
     conf_str_from_value(CONF_INT8, &test8, buf, sizeof(buf));
-    func("test/8", buf);
-    func("test/str", test_str);
+    func(&test_conf_handler, "8", buf);
+    func(&test_conf_handler, "str", test_str);
     return 0;
 }
 
@@ -199,19 +167,10 @@ task1_handler(void *arg)
 {
     struct os_task *t;
     int prev_pin_state, curr_pin_state;
-    struct image_version ver;
 
     /* Set the led pin for the E407 devboard */
     g_led_pin = LED_BLINK_PIN;
     hal_gpio_init_out(g_led_pin, 1);
-
-    if (imgr_my_version(&ver) == 0) {
-        console_printf("\nSlinky %u.%u.%u.%u\n",
-          ver.iv_major, ver.iv_minor, ver.iv_revision,
-          (unsigned int)ver.iv_build_num);
-    } else {
-        console_printf("\nSlinky\n");
-    }
 
     while (1) {
         t = os_sched_get_current_task();
@@ -220,14 +179,13 @@ task1_handler(void *arg)
         ++g_task1_loops;
 
         /* Wait one second */
-        os_time_delay(OS_TICKS_PER_SEC);
+        os_time_delay(1000);
 
         /* Toggle the LED */
         prev_pin_state = hal_gpio_read(g_led_pin);
         curr_pin_state = hal_gpio_toggle(g_led_pin);
         LOG_INFO(&my_log, LOG_MODULE_DEFAULT, "GPIO toggle from %u to %u",
             prev_pin_state, curr_pin_state);
-        STATS_INC(g_stats_gpio_toggle, toggles);
 
         /* Release semaphore to task 2 */
         os_sem_release(&g_test_sem);
@@ -276,69 +234,6 @@ init_tasks(void)
     return 0;
 }
 
-#ifdef NFFS_PRESENT
-static void
-setup_for_nffs(void)
-{
-    /* NFFS_AREA_MAX is defined in the BSP-specified bsp.h header file. */
-    struct nffs_area_desc descs[NFFS_AREA_MAX + 1];
-    int cnt;
-    int rc;
-
-    /* Initialize nffs's internal state. */
-    rc = nffs_init();
-    assert(rc == 0);
-
-    /* Convert the set of flash blocks we intend to use for nffs into an array
-     * of nffs area descriptors.
-     */
-    cnt = NFFS_AREA_MAX;
-    rc = flash_area_to_nffs_desc(FLASH_AREA_NFFS, &cnt, descs);
-    assert(rc == 0);
-
-    /* Attempt to restore an existing nffs file system from flash. */
-    if (nffs_detect(descs) == FS_ECORRUPT) {
-        /* No valid nffs instance detected; format a new one. */
-        rc = nffs_format(descs);
-        assert(rc == 0);
-    }
-
-    fs_mkdir(MY_CONFIG_DIR);
-    rc = conf_file_src(&my_conf);
-    assert(rc == 0);
-    rc = conf_file_dst(&my_conf);
-    assert(rc == 0);
-}
-
-#elif FCB_PRESENT
-
-static void
-setup_for_fcb(void)
-{
-    int cnt;
-    int rc;
-
-    rc = flash_area_to_sectors(FLASH_AREA_NFFS, &cnt, NULL);
-    assert(rc == 0);
-    assert(cnt <= sizeof(conf_fcb_area) / sizeof(conf_fcb_area[0]));
-    flash_area_to_sectors(FLASH_AREA_NFFS, &cnt, conf_fcb_area);
-
-    my_conf.cf_fcb.f_sector_cnt = cnt;
-
-    rc = conf_fcb_src(&my_conf);
-    if (rc) {
-        for (cnt = 0; cnt < my_conf.cf_fcb.f_sector_cnt; cnt++) {
-            flash_area_erase(&conf_fcb_area[cnt], 0,
-              conf_fcb_area[cnt].fa_size);
-        }
-        rc = conf_fcb_src(&my_conf);
-    }
-    assert(rc == 0);
-    rc = conf_fcb_dst(&my_conf);
-    assert(rc == 0);
-}
-
-#endif
 
 /**
  * main
@@ -353,6 +248,10 @@ int
 main(int argc, char **argv)
 {
     int rc;
+    int cnt;
+
+    /* NFFS_AREA_MAX is defined in the BSP-specified bsp.h header file. */
+    struct nffs_area_desc descs[NFFS_AREA_MAX + 1];
 
 #ifdef ARCH_sim
     mcu_sim_parse_args(argc, argv);
@@ -384,38 +283,46 @@ main(int argc, char **argv)
     rc = hal_flash_init();
     assert(rc == 0);
 
-#ifdef NFFS_PRESENT
-    setup_for_nffs();
-#elif FCB_PRESENT
-    setup_for_fcb();
-#endif
+    /* Initialize nffs's internal state. */
+    rc = nffs_init();
+    assert(rc == 0);
 
-    id_init();
+    /* Convert the set of flash blocks we intend to use for nffs into an array
+     * of nffs area descriptors.
+     */
+    cnt = NFFS_AREA_MAX;
+    rc = flash_area_to_nffs_desc(FLASH_AREA_NFFS, &cnt, descs);
+    assert(rc == 0);
+
+    /* Attempt to restore an existing nffs file system from flash. */
+    if (nffs_detect(descs) == FS_ECORRUPT) {
+        /* No valid nffs instance detected; format a new one. */
+        rc = nffs_format(descs);
+        assert(rc == 0);
+    }
+
+    fs_mkdir(MY_CONFIG_DIR);
+    rc = conf_file_src(&my_conf);
+    assert(rc == 0);
+    rc = conf_file_dst(&my_conf);
+    assert(rc == 0);
 
     shell_task_init(SHELL_TASK_PRIO, shell_stack, SHELL_TASK_STACK_SIZE,
                     SHELL_MAX_INPUT_LEN);
 
+    (void) console_init(shell_console_rx_cb);
+
     nmgr_task_init(NEWTMGR_TASK_PRIO, newtmgr_stack, NEWTMGR_TASK_STACK_SIZE);
     imgmgr_module_init();
+    bootutil_cfg_register();
 
     stats_module_init();
 
-    stats_init(STATS_HDR(g_stats_gpio_toggle),
-               STATS_SIZE_INIT_PARMS(g_stats_gpio_toggle, STATS_SIZE_32),
-               STATS_NAME_INIT_PARMS(gpio_stats));
-
-    stats_register("gpio_toggle", STATS_HDR(g_stats_gpio_toggle));
-
     flash_test_init();
-
-    reboot_init_handler(LOG_TYPE_STORAGE, 10);
 
     conf_load();
 
-    log_reboot(HARD_REBOOT);
-
     rc = init_tasks();
-
     os_start();
 
     /* os start should never return. If it does, this should be an error */

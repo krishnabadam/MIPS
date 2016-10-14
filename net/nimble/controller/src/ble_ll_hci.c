@@ -23,20 +23,18 @@
 #include "nimble/ble.h"
 #include "nimble/nimble_opt.h"
 #include "nimble/hci_common.h"
-#include "nimble/ble_hci_trans.h"
+#include "nimble/hci_transport.h"
 #include "controller/ble_hw.h"
 #include "controller/ble_ll_adv.h"
 #include "controller/ble_ll_scan.h"
 #include "controller/ble_ll.h"
 #include "controller/ble_ll_hci.h"
 #include "controller/ble_ll_whitelist.h"
-#include "controller/ble_ll_resolv.h"
 #include "ble_ll_conn_priv.h"
 
 /* LE event mask */
 static uint8_t g_ble_ll_hci_le_event_mask[BLE_HCI_SET_LE_EVENT_MASK_LEN];
 static uint8_t g_ble_ll_hci_event_mask[BLE_HCI_SET_EVENT_MASK_LEN];
-static uint8_t g_ble_ll_hci_event_mask2[BLE_HCI_SET_EVENT_MASK_LEN];
 
 /**
  * ll hci get num cmd pkts
@@ -64,13 +62,11 @@ ble_ll_hci_event_send(uint8_t *evbuf)
 {
     int rc;
 
-    assert(BLE_HCI_EVENT_HDR_LEN + evbuf[1] <= BLE_LL_MAX_EVT_LEN);
-
     /* Count number of events sent */
     STATS_INC(ble_ll_stats, hci_events_sent);
 
     /* Send the event to the host */
-    rc = ble_hci_trans_ll_evt_tx(evbuf);
+    rc = ble_hci_transport_ctlr_event_send(evbuf);
 
     return rc;
 }
@@ -88,7 +84,7 @@ ble_ll_hci_send_noop(void)
     uint8_t *evbuf;
     uint16_t opcode;
 
-    evbuf = ble_hci_trans_buf_alloc(BLE_HCI_TRANS_BUF_EVT_HI);
+    evbuf = os_memblock_get(&g_hci_cmd_pool);
     if (evbuf) {
         /* Create a command complete event with a NO-OP opcode */
         opcode = 0;
@@ -440,11 +436,7 @@ ble_ll_hci_is_le_event_enabled(int subev)
 /**
  * Checks to see if an event has been disabled by the host.
  *
- * NOTE: there are two "pages" of event masks; the first page is for event
- * codes between 0 and 63 and the second page is for event codes 64 and
- * greater.
- *
- * @param evcode This is the event code for the event.
+ * @param evcode This is the event code for the event (0 - 63).
  *
  * @return uint8_t 0: event is not enabled; otherwise event is enabled.
  */
@@ -454,20 +446,12 @@ ble_ll_hci_is_event_enabled(int evcode)
     uint8_t enabled;
     uint8_t bytenum;
     uint8_t bitmask;
-    uint8_t *evptr;
     int bitpos;
 
-    if (evcode >= 64) {
-        evptr = &g_ble_ll_hci_event_mask2[0];
-        bitpos = evcode - 64;
-    } else {
-        evptr = &g_ble_ll_hci_event_mask[0];
-        bitpos = evcode - 1;
-    }
-
+    bitpos = evcode - 1;
     bytenum = bitpos / 8;
     bitmask = 1 << (bitpos & 0x7);
-    enabled = evptr[bytenum] & bitmask;
+    enabled = g_ble_ll_hci_event_mask[bytenum] & bitmask;
 
     return enabled;
 }
@@ -655,32 +639,6 @@ ble_ll_hci_le_cmd_proc(uint8_t *cmdbuf, uint16_t ocf, uint8_t *rsplen)
         rc = ble_ll_hci_le_wr_sugg_data_len(cmdbuf);
         break;
 #endif
-#if (BLE_LL_CFG_FEAT_LL_PRIVACY == 1)
-    case BLE_HCI_OCF_LE_ADD_RESOLV_LIST :
-        rc = ble_ll_resolv_list_add(cmdbuf);
-        break;
-    case BLE_HCI_OCF_LE_RMV_RESOLV_LIST:
-        rc = ble_ll_resolv_list_rmv(cmdbuf);
-        break;
-    case BLE_HCI_OCF_LE_CLR_RESOLV_LIST:
-        rc = ble_ll_resolv_list_clr();
-        break;
-    case BLE_HCI_OCF_LE_RD_RESOLV_LIST_SIZE:
-        rc = ble_ll_resolv_list_read_size(rspbuf, rsplen);
-        break;
-    case BLE_HCI_OCF_LE_RD_PEER_RESOLV_ADDR:
-        rc = ble_ll_resolv_peer_addr_rd(cmdbuf);
-        break;
-    case BLE_HCI_OCF_LE_RD_LOCAL_RESOLV_ADDR:
-        ble_ll_resolv_local_addr_rd(cmdbuf);
-        break;
-    case BLE_HCI_OCF_LE_SET_ADDR_RES_EN:
-        rc = ble_ll_resolv_enable_cmd(cmdbuf);
-        break;
-    case BLE_HCI_OCF_LE_SET_RPA_TMO:
-        rc = ble_ll_resolv_set_rpa_tmo(cmdbuf);
-        break;
-#endif
     case BLE_HCI_OCF_LE_RD_MAX_DATA_LEN:
         rc = ble_ll_hci_le_rd_max_data_len(rspbuf, rsplen);
         break;
@@ -761,9 +719,6 @@ ble_ll_hci_ctlr_bb_cmd_proc(uint8_t *cmdbuf, uint16_t ocf, uint8_t *rsplen)
 {
     int rc;
     uint8_t len;
-#if (BLE_LL_CFG_FEAT_LE_PING == 1)
-    uint8_t *rspbuf;
-#endif
 
     /* Assume error; if all pass rc gets set to 0 */
     rc = BLE_ERR_INV_HCI_CMD_PARMS;
@@ -773,9 +728,6 @@ ble_ll_hci_ctlr_bb_cmd_proc(uint8_t *cmdbuf, uint16_t ocf, uint8_t *rsplen)
 
     /* Move past HCI command header */
     cmdbuf += BLE_HCI_CMD_HDR_LEN;
-#if (BLE_LL_CFG_FEAT_LE_PING == 1)
-    rspbuf = cmdbuf + BLE_HCI_EVENT_CMD_COMPLETE_MIN_LEN;
-#endif
 
     switch (ocf) {
     case BLE_HCI_OCF_CB_SET_EVENT_MASK:
@@ -789,20 +741,6 @@ ble_ll_hci_ctlr_bb_cmd_proc(uint8_t *cmdbuf, uint16_t ocf, uint8_t *rsplen)
             rc = ble_ll_reset();
         }
         break;
-    case BLE_HCI_OCF_CB_SET_EVENT_MASK2:
-        if (len == BLE_HCI_SET_EVENT_MASK_LEN) {
-            memcpy(g_ble_ll_hci_event_mask2, cmdbuf, len);
-            rc = BLE_ERR_SUCCESS;
-        }
-        break;
-#if (BLE_LL_CFG_FEAT_LE_PING == 1)
-    case BLE_HCI_OCF_CB_RD_AUTH_PYLD_TMO:
-        rc = ble_ll_conn_hci_wr_auth_pyld_tmo(cmdbuf, rspbuf, rsplen);
-        break;
-    case BLE_HCI_OCF_CB_WR_AUTH_PYLD_TMO:
-        rc = ble_ll_conn_hci_wr_auth_pyld_tmo(cmdbuf, rspbuf, rsplen);
-        break;
-#endif
     default:
         rc = BLE_ERR_UNKNOWN_HCI_CMD;
         break;
@@ -921,7 +859,7 @@ ble_ll_hci_cmd_proc(struct os_event *ev)
     assert(cmdbuf != NULL);
 
     /* Free the event */
-    err = os_memblock_put(&g_ble_ll_hci_ev_pool, ev);
+    err = os_memblock_put(&g_hci_os_event_pool, ev);
     assert(err == OS_OK);
 
     /* Get the opcode from the command buffer */
@@ -984,26 +922,19 @@ ble_ll_hci_cmd_proc(struct os_event *ev)
     ble_ll_hci_event_send(cmdbuf);
 }
 
-/**
- * Sends an HCI command to the controller.  On success, the supplied buffer is
- * relinquished to the controller task.  On failure, the caller must free the
- * buffer.
- *
- * @param cmd                   A flat buffer containing the HCI command to
- *                                  send.
- *
- * @return                      0 on success;
- *                              BLE_ERR_MEM_CAPACITY on HCI buffer exhaustion.
- */
+/* XXX: For now, put this here */
 int
-ble_ll_hci_cmd_rx(uint8_t *cmd, void *arg)
+ble_hci_transport_host_cmd_send(uint8_t *cmd)
 {
+    os_error_t err;
     struct os_event *ev;
 
     /* Get an event structure off the queue */
-    ev = (struct os_event *)os_memblock_get(&g_ble_ll_hci_ev_pool);
+    ev = (struct os_event *)os_memblock_get(&g_hci_os_event_pool);
     if (!ev) {
-        return BLE_ERR_MEM_CAPACITY;
+        err = os_memblock_put(&g_hci_cmd_pool, cmd);
+        assert(err == OS_OK);
+        return -1;
     }
 
     /* Fill out the event and post to Link Layer */
@@ -1017,7 +948,7 @@ ble_ll_hci_cmd_rx(uint8_t *cmd, void *arg)
 
 /* Send ACL data from host to contoller */
 int
-ble_ll_hci_acl_rx(struct os_mbuf *om, void *arg)
+ble_hci_transport_host_acl_data_send(struct os_mbuf *om)
 {
     ble_ll_acl_data_in(om);
     return 0;
@@ -1042,7 +973,4 @@ ble_ll_hci_init(void)
     g_ble_ll_hci_event_mask[3] = 0xff;
     g_ble_ll_hci_event_mask[4] = 0xff;
     g_ble_ll_hci_event_mask[5] = 0x1f;
-
-    /* Set page 2 to 0 */
-    memset(g_ble_ll_hci_event_mask2, 0, BLE_HCI_SET_EVENT_MASK_LEN);
 }

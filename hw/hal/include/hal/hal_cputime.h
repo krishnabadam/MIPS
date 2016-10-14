@@ -26,22 +26,6 @@ extern "C" {
 
 #include "os/queue.h"
 
-/*
- * NOTE: these definitions allow one to override the cputime frequency used.
- * The reason these definitions exist is to make the code more efficient/smaller
- * when CPUTIME counts at 1 MHz.
- *
- * For those who want a different cputime frequency, you can set the macro
- * HAL_CPUTIME to the desired frequency in your project, target or bsp.
- */
-#ifndef HAL_CPUTIME
-#define HAL_CPUTIME 1000000
-#endif
-
-#if (HAL_CPUTIME == 1000000)
-#define HAL_CPUTIME_1MHZ
-#endif
-
 /* CPU timer callback function */
 struct cpu_timer;
 typedef void (*cputimer_func)(void *arg);
@@ -53,23 +37,6 @@ struct cpu_timer {
     uint32_t        cputime;
     TAILQ_ENTRY(cpu_timer) link;
 };
-
-/* CPUTIME data. */
-struct cputime_data
-{
-    uint32_t ticks_per_usec;    /* number of ticks per usec */
-    uint32_t cputime_high;      /* high word of 64-bit cpu time */
-    uint32_t timer_isrs;        /* Number of timer interrupts */
-    uint32_t ocmp_ints;         /* Number of ocmp interrupts */
-    uint32_t uif_ints;          /* Number of overflow interrupts */
-};
-extern struct cputime_data g_cputime;
-
-/* Helpful macros to compare cputimes */
-#define CPUTIME_LT(__t1, __t2) ((int32_t)   ((__t1) - (__t2)) < 0)
-#define CPUTIME_GT(__t1, __t2) ((int32_t)   ((__t1) - (__t2)) > 0)
-#define CPUTIME_GEQ(__t1, __t2) ((int32_t)  ((__t1) - (__t2)) >= 0)
-#define CPUTIME_LEQ(__t1, __t2) ((int32_t)  ((__t1) - (__t2)) <= 0)
 
 /**
  * cputime init
@@ -124,10 +91,6 @@ uint32_t cputime_nsecs_to_ticks(uint32_t nsecs);
  */
 uint32_t cputime_ticks_to_nsecs(uint32_t ticks);
 
-#if defined(HAL_CPUTIME_1MHZ)
-#define cputime_usecs_to_ticks(x)       (x)
-#define cputime_ticks_to_usecs(x)       (x)
-#else
 /**
  * cputime usecs to ticks
  *
@@ -149,7 +112,6 @@ uint32_t cputime_usecs_to_ticks(uint32_t usecs);
  * @return uint32_t The number of microseconds corresponding to 'ticks'
  */
 uint32_t cputime_ticks_to_usecs(uint32_t ticks);
-#endif
 
 /**
  * cputime delay ticks
@@ -221,16 +183,11 @@ void cputime_timer_relative(struct cpu_timer *timer, uint32_t usecs);
  */
 void cputime_timer_stop(struct cpu_timer *timer);
 
-/*
- * Used between MCU specific files and generic HAL. Not intended as an API
- * to be called by the user.
- */
-void cputime_chk_expiration(void);
+#define CPUTIME_LT(__t1, __t2) ((int32_t)   ((__t1) - (__t2)) < 0)
+#define CPUTIME_GT(__t1, __t2) ((int32_t)   ((__t1) - (__t2)) > 0)
+#define CPUTIME_GEQ(__t1, __t2) ((int32_t)  ((__t1) - (__t2)) >= 0)
+#define CPUTIME_LEQ(__t1, __t2) ((int32_t)  ((__t1) - (__t2)) <= 0)
 
-/*--- HW specific API. These are not intended to be called by user  ---*/
-void cputime_disable_ocmp(void);
-void cputime_set_ocmp(struct cpu_timer *timer);
-int cputime_hw_init(uint32_t clock_freq);
 
 #ifdef __cplusplus
 }

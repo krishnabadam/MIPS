@@ -19,94 +19,132 @@
 
 #include <string.h>
 #include <inttypes.h>
-#include <assert.h>
 #include <hal/hal_flash.h>
-#include <hal/flash_map.h>
-#include <hal/hal_bsp.h>
+#include <config/config.h>
 #include <os/os.h>
 #include "bootutil/image.h"
-#include "bootutil/bootutil_misc.h"
 #include "bootutil_priv.h"
 
-/*
- * Read the image trailer from a given slot.
- */
+#ifdef USE_STATUS_FILE
+#include <fs/fs.h>
+#include <fs/fsutil.h>
+#endif
+
+static int boot_conf_set(int argc, char **argv, char *val);
+
+static struct image_version boot_main;
+static struct image_version boot_test;
+#ifndef USE_STATUS_FILE
+static struct boot_status boot_saved;
+#endif
+
+static struct conf_handler boot_conf_handler = {
+    .ch_name = "boot",
+    .ch_get = NULL,
+    .ch_set = boot_conf_set,
+    .ch_commit = NULL,
+    .ch_export = NULL,
+};
+
 static int
-boot_vect_read_img_trailer(int slot, struct boot_img_trailer *bit)
+boot_conf_set(int argc, char **argv, char *val)
 {
     int rc;
-    const struct flash_area *fap;
-    uint32_t off;
+    int len;
 
-    rc = flash_area_open(slot, &fap);
-    if (rc) {
-        return rc;
+    if (argc == 1) {
+        if (!strcmp(argv[0], "main")) {
+            len = sizeof(boot_main);
+            if (val) {
+                rc = conf_bytes_from_str(val, &boot_main, &len);
+            } else {
+                memset(&boot_main, 0, len);
+                rc = 0;
+            }
+        } else if (!strcmp(argv[0], "test")) {
+            len = sizeof(boot_test);
+            if (val) {
+                rc = conf_bytes_from_str(val, &boot_test, &len);
+            } else {
+                memset(&boot_test, 0, len);
+                rc = 0;
+            }
+#ifndef USE_STATUS_FILE
+        } else if (!strcmp(argv[0], "status")) {
+            if (!val) {
+                boot_saved.state = 0;
+                rc = 0;
+            } else {
+                rc = conf_value_from_str(val, CONF_INT32,
+                  &boot_saved.state, sizeof(boot_saved.state));
+            }
+        } else if (!strcmp(argv[0], "len")) {
+            conf_value_from_str(val, CONF_INT32, &boot_saved.length,
+              sizeof(boot_saved.length));
+            rc = 0;
+#endif
+        } else {
+            rc = OS_ENOENT;
+        }
+    } else {
+        rc = OS_ENOENT;
     }
-    off = fap->fa_size - sizeof(struct boot_img_trailer);
-    rc = flash_area_read(fap, off, bit, sizeof(*bit));
-    flash_area_close(fap);
-
     return rc;
 }
 
+static int
+boot_vect_read_one(struct image_version *dst, struct image_version *src)
+{
+    if (src->iv_major == 0 && src->iv_minor == 0 &&
+      src->iv_revision == 0 && src->iv_build_num == 0) {
+        return BOOT_EBADVECT;
+    }
+    memcpy(dst, src, sizeof(*dst));
+    return 0;
+}
+
 /**
- * Retrieves from the slot number of the test image (i.e.,
+ * Retrieves from the boot vector the version number of the test image (i.e.,
  * the image that has not been proven stable, and which will only run once).
  *
- * @param slot              On success, the slot number of image to boot.
+ * @param out_ver           On success, the test version gets written here.
  *
  * @return                  0 on success; nonzero on failure.
  */
 int
-boot_vect_read_test(int *slot)
+boot_vect_read_test(struct image_version *out_ver)
 {
-    struct boot_img_trailer bit;
-    int i;
-    int rc;
-
-    for (i = FLASH_AREA_IMAGE_0; i <= FLASH_AREA_IMAGE_1; i++) {
-        if (i == bsp_imgr_current_slot()) {
-            continue;
-        }
-        rc = boot_vect_read_img_trailer(i, &bit);
-        if (rc) {
-            continue;
-        }
-        if (bit.bit_copy_start == BOOT_IMG_MAGIC) {
-            *slot = i;
-            return 0;
-        }
-    }
-    return -1;
+    return boot_vect_read_one(out_ver, &boot_test);
 }
 
 /**
- * Retrieves from the slot number of the main image. If this is
- * different from test image slot, next restart will revert to main.
+ * Retrieves from the boot vector the version number of the main image.
  *
  * @param out_ver           On success, the main version gets written here.
  *
  * @return                  0 on success; nonzero on failure.
  */
 int
-boot_vect_read_main(int *slot)
+boot_vect_read_main(struct image_version *out_ver)
 {
-    int rc;
-    struct boot_img_trailer bit;
+    return boot_vect_read_one(out_ver, &boot_main);
+}
 
-    rc = boot_vect_read_img_trailer(FLASH_AREA_IMAGE_0, &bit);
-    assert(rc == 0);
+static int
+boot_vect_write_one(const char *name, struct image_version *ver)
+{
+    char str[CONF_STR_FROM_BYTES_LEN(sizeof(struct image_version))];
+    char *to_store;
 
-    if (bit.bit_copy_start != BOOT_IMG_MAGIC || bit.bit_img_ok != 0xff) {
-        /*
-         * If there never was copy that took place, or if the current
-         * image has been marked good, we'll keep booting it.
-         */
-        *slot = FLASH_AREA_IMAGE_0;
+    if (!ver) {
+        to_store = NULL;
     } else {
-        *slot = FLASH_AREA_IMAGE_1;
+        if (!conf_str_from_bytes(ver, sizeof(*ver), str, sizeof(str))) {
+            return -1;
+        }
+        to_store = str;
     }
-    return 0;
+    return conf_save_one(&boot_conf_handler, name, to_store);
 }
 
 /**
@@ -115,63 +153,56 @@ boot_vect_read_main(int *slot)
  * @return                  0 on success; nonzero on failure.
  */
 int
-boot_vect_write_test(int slot)
+boot_vect_write_test(struct image_version *ver)
 {
-    const struct flash_area *fap;
-    uint32_t off;
-    uint32_t magic;
-    int rc;
-
-    rc = flash_area_open(slot, &fap);
-    if (rc) {
-        return rc;
+    if (!ver) {
+        memset(&boot_test, 0, sizeof(boot_test));
+        return boot_vect_write_one("test", NULL);
+    } else {
+        memcpy(&boot_test, ver, sizeof(boot_test));
+        return boot_vect_write_one("test", &boot_test);
     }
-
-    off = fap->fa_size - sizeof(struct boot_img_trailer);
-    magic = BOOT_IMG_MAGIC;
-
-    rc = flash_area_write(fap, off, &magic, sizeof(magic));
-    flash_area_close(fap);
-
-    return rc;
 }
 
 /**
  * Deletes the main image version number from the boot vector.
- * This must be called by the app to confirm that it is ok to keep booting
- * to this image.
  *
  * @return                  0 on success; nonzero on failure.
  */
 int
-boot_vect_write_main(void)
+boot_vect_write_main(struct image_version *ver)
 {
-    const struct flash_area *fap;
-    uint32_t off;
+    if (!ver) {
+        memset(&boot_main, 0, sizeof(boot_main));
+        return boot_vect_write_one("main", NULL);
+    } else {
+        memcpy(&boot_main, ver, sizeof(boot_main));
+        return boot_vect_write_one("main", &boot_main);
+    }
+}
+
+static int
+boot_read_image_header(struct image_header *out_hdr,
+                       const struct boot_image_location *loc)
+{
     int rc;
-    uint8_t val;
 
-    /*
-     * Write to slot 0.
-     */
-    rc = flash_area_open(FLASH_AREA_IMAGE_0, &fap);
-    if (rc) {
-        return rc;
+    rc = hal_flash_read(loc->bil_flash_id, loc->bil_address, out_hdr,
+                        sizeof *out_hdr);
+    if (rc != 0) {
+        return BOOT_EFLASH;
     }
 
-    off = fap->fa_size - sizeof(struct boot_img_trailer);
-    off += (sizeof(uint32_t) + sizeof(uint8_t));
-    rc = flash_area_read(fap, off, &val, sizeof(val));
-    if (!rc && val == 0xff) {
-        val = 0;
-        rc = flash_area_write(fap, off, &val, sizeof(val));
+    if (out_hdr->ih_magic != IMAGE_MAGIC) {
+        return BOOT_EBADIMAGE;
     }
-    return rc;
+
+    return 0;
 }
 
 /**
- * Reads the header of image present in flash.  Header corresponding to
- * empty image slot is filled with 0xff bytes.
+ * Reads the header of each image present in flash.  Headers corresponding to
+ * empty image slots are filled with 0xff bytes.
  *
  * @param out_headers           Points to an array of image headers.  Each
  *                                  element is filled with the header of the
@@ -182,135 +213,118 @@ boot_vect_write_main(void)
  *                                  also be equal to the lengths of the
  *                                  out_headers and addresses arrays.
  */
-int
-boot_read_image_header(struct boot_image_location *loc,
-                       struct image_header *out_hdr)
+void
+boot_read_image_headers(struct image_header *out_headers,
+                        const struct boot_image_location *addresses,
+                        int num_addresses)
 {
+    struct image_header *hdr;
     int rc;
+    int i;
 
-    rc = hal_flash_read(loc->bil_flash_id, loc->bil_address, out_hdr,
-                        sizeof *out_hdr);
-    if (rc != 0) {
-        rc = BOOT_EFLASH;
-    } else if (out_hdr->ih_magic != IMAGE_MAGIC) {
-        rc = BOOT_EBADIMAGE;
+    for (i = 0; i < num_addresses; i++) {
+        hdr = out_headers + i;
+        rc = boot_read_image_header(hdr, &addresses[i]);
+        if (rc != 0 || hdr->ih_magic != IMAGE_MAGIC) {
+            memset(hdr, 0xff, sizeof *hdr);
+        }
     }
-
-    if (rc) {
-        memset(out_hdr, 0xff, sizeof(*out_hdr));
-    }
-    return rc;
 }
 
-/*
- * How far has the copy progressed?
- */
-static void
-boot_read_status_bytes(struct boot_status *bs, uint8_t flash_id, uint32_t off)
+void
+bootutil_cfg_register(void)
 {
-    uint8_t status;
-
-    assert(bs->elem_sz);
-    off -= bs->elem_sz * 2;
-    while (1) {
-        hal_flash_read(flash_id, off, &status, sizeof(status));
-        if (status == 0xff) {
-            break;
-        }
-        off -= bs->elem_sz;
-        if (bs->state == 2) {
-            bs->idx++;
-            bs->state = 0;
-        } else {
-            bs->state++;
-        }
-    }
+    conf_register(&boot_conf_handler);
 }
 
-/**
- * Reads the boot status from the flash.  The boot status contains
- * the current state of an interrupted image copy operation.  If the boot
- * status is not present, or it indicates that previous copy finished,
- * there is no operation in progress.
- */
+#ifndef USE_STATUS_FILE
 int
 boot_read_status(struct boot_status *bs)
 {
-    struct boot_img_trailer bit;
-    uint8_t flash_id;
-    uint32_t off;
+    conf_load();
 
-    /*
-     * Check if boot_img_trailer is in scratch, or at the end of slot0.
-     */
-    boot_slot_magic(0, &bit);
-    if (bit.bit_copy_start == BOOT_IMG_MAGIC && bit.bit_copy_done == 0xff) {
-        boot_magic_loc(0, &flash_id, &off);
-        boot_read_status_bytes(bs, flash_id, off);
-        return 1;
-    }
-    boot_scratch_magic(&bit);
-    if (bit.bit_copy_start == BOOT_IMG_MAGIC && bit.bit_copy_done == 0xff) {
-        boot_scratch_loc(&flash_id, &off);
-        boot_read_status_bytes(bs, flash_id, off);
-        return 1;
-    }
-    return 0;
+    *bs = boot_saved;
+    return (boot_saved.state != 0);
 }
-
 
 /**
  * Writes the supplied boot status to the flash file system.  The boot status
  * contains the current state of an in-progress image copy operation.
  *
- * @param bs                    The boot status to write.
+ * @param status                The boot status base to write.
  *
  * @return                      0 on success; nonzero on failure.
  */
 int
 boot_write_status(struct boot_status *bs)
 {
-    uint32_t off;
-    uint8_t flash_id;
-    uint8_t val;
+    char str[12];
+    int rc;
 
-    if (bs->idx == 0) {
-        /*
-         * Write to scratch
-         */
-        boot_scratch_loc(&flash_id, &off);
-    } else {
-        /*
-         * Write to slot 0;
-         */
-        boot_magic_loc(0, &flash_id, &off);
+    rc = conf_save_one(&boot_conf_handler, "status",
+      conf_str_from_value(CONF_INT32, &bs->state, str, sizeof(str)));
+    if (rc) {
+        return rc;
     }
-    off -= ((3 * bs->elem_sz) * bs->idx + bs->elem_sz * (bs->state + 1));
-
-    val = bs->state;
-    hal_flash_write(flash_id, off, &val, sizeof(val));
-
-    return 0;
+    return conf_save_one(&boot_conf_handler, "len",
+      conf_str_from_value(CONF_INT32, &bs->length, str, sizeof(str)));
 }
 
 /**
- * Finalizes the copy-in-progress status on the flash.  The boot status
+ * Erases the boot status from the flash file system.  The boot status
  * contains the current state of an in-progress image copy operation.  By
- * clearing this, it is implied that there is no copy operation in
+ * erasing the boot status, it is implied that there is no copy operation in
  * progress.
  */
 void
 boot_clear_status(void)
 {
-    uint32_t off;
-    uint8_t val = 0;
-    uint8_t flash_id;
+    conf_save_one(&boot_conf_handler, "status", NULL);
+}
+
+#else
+
+/**
+ * Reads the boot status from the flash file system.  The boot status contains
+ * the current state of an interrupted image copy operation.  If the boot
+ * status is not present in the file system, the implication is that there is
+ * no copy operation in progress.
+ */
+int
+boot_read_status(struct boot_status *bs)
+{
+    int rc;
+    uint32_t bytes_read;
+
+    conf_load();
+
+    rc = fsutil_read_file(BOOT_PATH_STATUS, 0, sizeof(*bs),
+      bs, &bytes_read);
+    if (rc || bytes_read != sizeof(*bs)) {
+        memset(bs, 0, sizeof(*bs));
+        return 0;
+    }
+    return 1;
+}
+
+int
+boot_write_status(struct boot_status *bs)
+{
+    int rc;
 
     /*
-     * Write to slot 0; boot_img_trailer is the 8 bytes within image slot.
-     * Here we say that copy operation was finished.
+     * XXX point of failure.
      */
-    boot_magic_loc(0, &flash_id, &off);
-    off += sizeof(uint32_t);
-    hal_flash_write(flash_id, off, &val, sizeof(val));
+    rc = fsutil_write_file(BOOT_PATH_STATUS, bs, sizeof(*bs));
+    if (rc) {
+        rc = BOOT_EFILE;
+    }
+    return rc;
 }
+
+void
+boot_clear_status(void)
+{
+    fs_unlink(BOOT_PATH_STATUS);
+}
+#endif

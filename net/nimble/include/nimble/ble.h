@@ -34,6 +34,10 @@ struct ble_encryption_block
     uint8_t     cipher_text[BLE_ENC_BLOCK_SIZE];
 };
 
+/* Shared command pool for transort between host and controller */
+extern struct os_mempool g_hci_cmd_pool;
+extern struct os_mempool g_hci_os_event_pool;
+
 /*
  * BLE MBUF structure:
  *
@@ -58,7 +62,7 @@ struct ble_mbuf_hdr_rxinfo
     uint8_t flags;
     uint8_t channel;
     uint8_t handle;
-    int8_t  rssi;
+    int8_t rssi;
 };
 
 /* Flag definitions for rxinfo  */
@@ -67,8 +71,7 @@ struct ble_mbuf_hdr_rxinfo
 #define BLE_MBUF_HDR_F_MIC_FAILURE      (0x20)
 #define BLE_MBUF_HDR_F_SCAN_RSP_TXD     (0x10)
 #define BLE_MBUF_HDR_F_SCAN_RSP_CHK     (0x08)
-#define BLE_MBUF_HDR_F_RESOLVED         (0x04)
-#define BLE_MBUF_HDR_F_RXSTATE_MASK     (0x03)
+#define BLE_MBUF_HDR_F_RXSTATE_MASK     (0x07)
 
 /* Transmit info. NOTE: no flags defined */
 struct ble_mbuf_hdr_txinfo
@@ -99,9 +102,6 @@ struct ble_mbuf_hdr
 
 #define BLE_MBUF_HDR_MIC_FAILURE(hdr)   \
     ((hdr)->rxinfo.flags & BLE_MBUF_HDR_F_MIC_FAILURE)
-
-#define BLE_MBUF_HDR_RESOLVED(hdr)      \
-    ((hdr)->rxinfo.flags & BLE_MBUF_HDR_F_RESOLVED)
 
 #define BLE_MBUF_HDR_RX_STATE(hdr)      \
     ((hdr)->rxinfo.flags & BLE_MBUF_HDR_F_RXSTATE_MASK)
@@ -136,17 +136,14 @@ extern uint8_t g_random_addr[BLE_DEV_ADDR_LEN];
 void htole16(void *buf, uint16_t x);
 void htole32(void *buf, uint32_t x);
 void htole64(void *buf, uint64_t x);
-uint16_t le16toh(const void *buf);
-uint32_t le32toh(const void *buf);
-uint64_t le64toh(const void *buf);
+uint16_t le16toh(void *buf);
+uint32_t le32toh(void *buf);
+uint64_t le64toh(void *buf);
 void htobe16(void *buf, uint16_t x);
 void htobe32(void *buf, uint32_t x);
 void htobe64(void *buf, uint64_t x);
-uint16_t be16toh(const void *buf);
-uint32_t be32toh(const void *buf);
-uint64_t be64toh(const void *buf);
 void swap_in_place(void *buf, int len);
-void swap_buf(uint8_t *dst, const uint8_t *src, int len);
+void swap_buf(uint8_t *dst, uint8_t *src, int len);
 /* XXX */
 
 /* BLE Error Codes (Core v4.2 Vol 2 part D) */
@@ -218,19 +215,12 @@ enum ble_error_codes
     BLE_ERR_CONN_ESTABLISHMENT  = 62,
     BLE_ERR_MAC_CONN_FAIL       = 63,
     BLE_ERR_COARSE_CLK_ADJ      = 64,
+    BLE_ERR_ATTR_NOT_FOUND      = 65,
     BLE_ERR_MAX                 = 255
 };
 
 /* Address types */
-#define BLE_ADDR_TYPE_PUBLIC            (0)
-#define BLE_ADDR_TYPE_RANDOM            (1)
-#define BLE_ADDR_TYPE_RPA_PUB_DEFAULT   (2)
-#define BLE_ADDR_TYPE_RPA_RND_DEFAULT   (3)
-
-int ble_err_from_os(int os_err);
-
-/* HW error codes */
-#define BLE_HW_ERR_DO_NOT_USE           (0) /* XXX: reserve this one for now */
-#define BLE_HW_ERR_HCI_SYNC_LOSS        (1)
+#define BLE_ADDR_TYPE_PUBLIC    (0)
+#define BLE_ADDR_TYPE_RANDOM    (1)
 
 #endif /* H_BLE_ */

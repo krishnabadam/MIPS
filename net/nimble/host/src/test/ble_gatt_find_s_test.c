@@ -25,7 +25,7 @@
 #include "host/ble_uuid.h"
 #include "ble_hs_test_util.h"
 
-static struct ble_gatt_svc ble_gatt_find_s_test_svcs[256];
+static struct ble_gatt_service ble_gatt_find_s_test_svcs[256];
 static int ble_gatt_find_s_test_num_svcs;
 static int ble_gatt_find_s_test_proc_complete;
 
@@ -46,25 +46,17 @@ ble_gatt_find_s_test_misc_init(void)
 
 static int
 ble_gatt_find_s_test_misc_cb(uint16_t conn_handle,
-                             const struct ble_gatt_error *error,
-                             const struct ble_gatt_svc *service,
+                             struct ble_gatt_error *error,
+                             struct ble_gatt_service *service,
                              void *arg)
 {
     TEST_ASSERT(!ble_gatt_find_s_test_proc_complete);
-    TEST_ASSERT(error != NULL);
+    TEST_ASSERT(error == NULL);
 
-    switch (error->status) {
-    case 0:
-        ble_gatt_find_s_test_svcs[ble_gatt_find_s_test_num_svcs++] = *service;
-        break;
-
-    case BLE_HS_EDONE:
+    if (service == NULL) {
         ble_gatt_find_s_test_proc_complete = 1;
-        break;
-
-    default:
-        TEST_ASSERT(0);
-        break;
+    } else {
+        ble_gatt_find_s_test_svcs[ble_gatt_find_s_test_num_svcs++] = *service;
     }
 
     return 0;
@@ -188,7 +180,7 @@ ble_gatt_find_s_test_misc_find_inc(uint16_t conn_handle,
                                    uint16_t start_handle, uint16_t end_handle,
                                    struct ble_gatt_find_s_test_entry *entries)
 {
-    struct ble_gatt_svc service;
+    struct ble_gatt_service service;
     int cur_start;
     int num_found;
     int idx;
@@ -328,8 +320,6 @@ TEST_CASE(ble_gatt_find_s_test_1)
 
 TEST_SUITE(ble_gatt_find_s_test_suite)
 {
-    tu_suite_set_post_test_cb(ble_hs_test_util_post_test, NULL);
-
     ble_gatt_find_s_test_1();
 }
 

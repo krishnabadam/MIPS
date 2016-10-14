@@ -24,17 +24,14 @@
 #include "shell/shell.h"
 
 #include "nimble/ble.h"
-#include "nimble/nimble_opt.h"
 #include "nimble/hci_common.h"
 #include "host/ble_gap.h"
 #include "host/ble_hs_adv.h"
-#include "host/ble_sm.h"
 #include "host/ble_eddystone.h"
-#include "host/ble_hs_id.h"
 #include "../src/ble_l2cap_priv.h"
 #include "../src/ble_hs_priv.h"
 
-#include "bletiny.h"
+#include "bletiny_priv.h"
 
 #define CMD_BUF_SZ      256
 
@@ -88,7 +85,7 @@ cmd_print_chr(struct bletiny_chr *chr)
     struct bletiny_dsc *dsc;
 
     console_printf("        def_handle=%d val_handle=%d properties=0x%02x "
-                   "uuid=", chr->chr.def_handle, chr->chr.val_handle,
+                   "uuid=", chr->chr.decl_handle, chr->chr.value_handle,
                    chr->chr.properties);
     print_uuid(chr->chr.uuid128);
     console_printf("\n");
@@ -246,8 +243,6 @@ static struct kv_pair cmd_adv_disc_modes[] = {
 static struct kv_pair cmd_adv_addr_types[] = {
     { "public", BLE_ADDR_TYPE_PUBLIC },
     { "random", BLE_ADDR_TYPE_RANDOM },
-    { "rpa_pub", BLE_ADDR_TYPE_RPA_PUB_DEFAULT },
-    { "rpa_rnd", BLE_ADDR_TYPE_RPA_RND_DEFAULT },
     { NULL }
 };
 
@@ -261,11 +256,20 @@ static struct kv_pair cmd_adv_filt_types[] = {
 static int
 cmd_adv(int argc, char **argv)
 {
-    struct ble_gap_adv_params params;
-    int32_t duration_ms;
-    uint8_t peer_addr_type;
-    uint8_t own_addr_type;
-    uint8_t peer_addr[8];
+    struct hci_adv_params params = {
+        .adv_itvl_min = 0,
+        .adv_itvl_max = 0,
+        .adv_type = BLE_HCI_ADV_TYPE_ADV_IND,
+        .own_addr_type = BLE_HCI_ADV_OWN_ADDR_PUBLIC,
+        .peer_addr_type = BLE_HCI_ADV_PEER_ADDR_PUBLIC,
+        .adv_channel_map = BLE_HCI_ADV_CHANMASK_DEF,
+        .adv_filter_policy = BLE_HCI_ADV_FILT_DEF,
+    };
+    uint8_t peer_addr[6];
+    uint8_t u8;
+    int addr_type;
+    int conn;
+    int disc;
     int rc;
 
     if (argc > 1 && strcmp(argv[1], "stop") == 0) {
@@ -278,76 +282,48 @@ cmd_adv(int argc, char **argv)
         return 0;
     }
 
-    params.conn_mode = parse_arg_kv_default("conn", cmd_adv_conn_modes,
-                                            BLE_GAP_CONN_MODE_UND, &rc);
-    if (rc != 0) {
+    conn = parse_arg_kv("conn", cmd_adv_conn_modes);
+    if (conn == -1) {
         console_printf("invalid 'conn' parameter\n");
-        return rc;
+        return -1;
     }
 
-    params.disc_mode = parse_arg_kv_default("disc", cmd_adv_disc_modes,
-                                            BLE_GAP_DISC_MODE_GEN, &rc);
-    if (rc != 0) {
-        console_printf("invalid 'disc' parameter\n");
-        return rc;
+    disc = parse_arg_kv("disc", cmd_adv_disc_modes);
+    if (disc == -1) {
+        console_printf("missing 'disc' parameter\n");
+        return -1;
     }
 
-    peer_addr_type = parse_arg_kv_default(
-        "peer_addr_type", cmd_adv_addr_types, BLE_ADDR_TYPE_PUBLIC, &rc);
-    if (rc != 0) {
-        return rc;
-    }
+    if (conn == BLE_GAP_CONN_MODE_DIR) {
+        addr_type = parse_arg_kv("addr_type", cmd_adv_addr_types);
+        if (addr_type == -1) {
+            return -1;
+        }
 
-    rc = parse_arg_mac("peer_addr", peer_addr);
-    if (rc == ENOENT) {
+        rc = parse_arg_mac("addr", peer_addr);
+        if (rc != 0) {
+            return rc;
+        }
+    } else {
+        addr_type = 0;
         memset(peer_addr, 0, sizeof peer_addr);
-    } else if (rc != 0) {
+    }
+
+    u8 = parse_arg_long_bounds("chan_map", 0, 0xff, &rc);
+    if (rc == 0) {
+        params.adv_channel_map = u8;
+    } else if (rc != ENOENT) {
         return rc;
     }
 
-    own_addr_type = parse_arg_kv_default(
-        "own_addr_type", cmd_adv_addr_types, BLE_ADDR_TYPE_PUBLIC, &rc);
-    if (rc != 0) {
-        return rc;
+    if (parse_arg_find("filt") != NULL) {
+        params.adv_filter_policy = parse_arg_kv("filt", cmd_adv_filt_types);
+        if (params.adv_filter_policy == -1) {
+            return EINVAL;
+        }
     }
 
-    params.channel_map = parse_arg_long_bounds_default("chan_map", 0, 0xff, 0,
-                                                       &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    params.filter_policy = parse_arg_kv_default("filt", cmd_adv_filt_types,
-                                                BLE_HCI_ADV_FILT_NONE, &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    params.itvl_min = parse_arg_long_bounds_default("itvl_min", 0, UINT16_MAX,
-                                                    0, &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    params.itvl_max = parse_arg_long_bounds_default("itvl_max", 0, UINT16_MAX,
-                                                    0, &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    params.high_duty_cycle = parse_arg_long_bounds_default("hd", 0, 1, 0, &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    duration_ms = parse_arg_long_bounds_default("dur", 1, INT32_MAX,
-                                                BLE_HS_FOREVER, &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    rc = bletiny_adv_start(own_addr_type, peer_addr_type, peer_addr,
-                           duration_ms, &params);
+    rc = bletiny_adv_start(disc, conn, peer_addr, addr_type, &params);
     if (rc != 0) {
         console_printf("advertise fail: %d\n", rc);
         return rc;
@@ -360,31 +336,21 @@ cmd_adv(int argc, char **argv)
  * $connect                                                                  *
  *****************************************************************************/
 
-static struct kv_pair cmd_conn_peer_addr_types[] = {
+static struct kv_pair cmd_conn_addr_types[] = {
     { "public",         BLE_HCI_CONN_PEER_ADDR_PUBLIC },
     { "random",         BLE_HCI_CONN_PEER_ADDR_RANDOM },
-    { "rpa_pub",        BLE_HCI_CONN_PEER_ADDR_PUBLIC_IDENT },
-    { "rpa_rnd",        BLE_HCI_CONN_PEER_ADDR_RANDOM_IDENT },
+    { "public_ident",   BLE_HCI_CONN_PEER_ADDR_PUBLIC_IDENT },
+    { "random_ident",   BLE_HCI_CONN_PEER_ADDR_RANDOM_IDENT },
     { "wl",             BLE_GAP_ADDR_TYPE_WL },
-    { NULL }
-};
-
-static struct kv_pair cmd_conn_own_addr_types[] = {
-    { "public", BLE_ADDR_TYPE_PUBLIC },
-    { "random", BLE_ADDR_TYPE_RANDOM },
-    { "rpa_pub", BLE_ADDR_TYPE_RPA_PUB_DEFAULT },
-    { "rpa_rnd", BLE_ADDR_TYPE_RPA_RND_DEFAULT },
     { NULL }
 };
 
 static int
 cmd_conn(int argc, char **argv)
 {
-    struct ble_gap_conn_params params;
-    int32_t duration_ms;
+    struct ble_gap_crt_params params;
     uint8_t peer_addr[6];
-    int peer_addr_type;
-    int own_addr_type;
+    int addr_type;
     int rc;
 
     if (argc > 1 && strcmp(argv[1], "cancel") == 0) {
@@ -397,32 +363,18 @@ cmd_conn(int argc, char **argv)
         return 0;
     }
 
-    peer_addr_type = parse_arg_kv_default("peer_addr_type",
-                                          cmd_conn_peer_addr_types,
-                                          BLE_ADDR_TYPE_PUBLIC, &rc);
-    if (rc != 0) {
-        return rc;
+    addr_type = parse_arg_kv("addr_type", cmd_conn_addr_types);
+    if (addr_type == -1) {
+        return -1;
     }
 
-    if (peer_addr_type != BLE_GAP_ADDR_TYPE_WL) {
-        rc = parse_arg_mac("peer_addr", peer_addr);
-        if (rc == ENOENT) {
-            /* Allow "addr" for backwards compatibility. */
-            rc = parse_arg_mac("addr", peer_addr);
-        }
-
+    if (addr_type != BLE_GAP_ADDR_TYPE_WL) {
+        rc = parse_arg_mac("addr", peer_addr);
         if (rc != 0) {
             return rc;
         }
     } else {
         memset(peer_addr, 0, sizeof peer_addr);
-    }
-
-    own_addr_type = parse_arg_kv_default("own_addr_type",
-                                         cmd_conn_own_addr_types,
-                                         BLE_ADDR_TYPE_PUBLIC, &rc);
-    if (rc != 0) {
-        return rc;
     }
 
     params.scan_itvl = parse_arg_uint16_dflt("scan_itvl", 0x0010, &rc);
@@ -467,13 +419,7 @@ cmd_conn(int argc, char **argv)
         return rc;
     }
 
-    duration_ms = parse_arg_long_bounds_default("dur", 1, INT32_MAX, 0, &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    rc = bletiny_conn_initiate(own_addr_type, peer_addr_type, peer_addr,
-                               duration_ms, &params);
+    rc = bletiny_conn_initiate(addr_type, peer_addr, &params);
     if (rc != 0) {
         return rc;
     }
@@ -482,7 +428,7 @@ cmd_conn(int argc, char **argv)
 }
 
 /*****************************************************************************
- * $chrup                                                                    *
+ * $connect                                                                  *
  *****************************************************************************/
 
 static int
@@ -497,42 +443,6 @@ cmd_chrup(int argc, char **argv)
     }
 
     bletiny_chrup(attr_handle);
-
-    return 0;
-}
-
-/*****************************************************************************
- * $datalen                                                                  *
- *****************************************************************************/
-
-static int
-cmd_datalen(int argc, char **argv)
-{
-    uint16_t conn_handle;
-    uint16_t tx_octets;
-    uint16_t tx_time;
-    int rc;
-
-    conn_handle = parse_arg_uint16("conn", &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    tx_octets = parse_arg_long("octets", &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    tx_time = parse_arg_long("time", &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    rc = bletiny_datalen(conn_handle, tx_octets, tx_time);
-    if (rc != 0) {
-        console_printf("error setting data length; rc=%d\n", rc);
-        return rc;
-    }
 
     return 0;
 }
@@ -623,31 +533,10 @@ cmd_disc_svc(int argc, char **argv)
     return 0;
 }
 
-static int
-cmd_disc_full(int argc, char **argv)
-{
-    int conn_handle;
-    int rc;
-
-    conn_handle = parse_arg_uint16("conn", &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    rc = bletiny_disc_full(conn_handle);
-    if (rc != 0) {
-        console_printf("error discovering all; rc=%d\n", rc);
-        return rc;
-    }
-
-    return 0;
-}
-
 static struct cmd_entry cmd_disc_entries[] = {
     { "chr", cmd_disc_chr },
     { "dsc", cmd_disc_dsc },
     { "svc", cmd_disc_svc },
-    { "full", cmd_disc_full },
     { NULL, NULL }
 };
 
@@ -890,35 +779,20 @@ cmd_read(int argc, char **argv)
 }
 
 /*****************************************************************************
- * $rssi                                                                     *
- *****************************************************************************/
-
-static int
-cmd_rssi(int argc, char **argv)
-{
-    uint16_t conn_handle;
-    int8_t rssi;
-    int rc;
-
-    conn_handle = parse_arg_uint16("conn", &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    rc = bletiny_rssi(conn_handle, &rssi);
-    if (rc != 0) {
-        console_printf("error reading rssi; rc=%d\n", rc);
-        return rc;
-    }
-
-    console_printf("conn=%d rssi=%d\n", conn_handle, rssi);
-
-    return 0;
-}
-
-/*****************************************************************************
  * $scan                                                                     *
  *****************************************************************************/
+
+static struct kv_pair cmd_scan_disc_modes[] = {
+    { "ltd", BLE_GAP_DISC_MODE_LTD },
+    { "gen", BLE_GAP_DISC_MODE_GEN },
+    { NULL }
+};
+
+static struct kv_pair cmd_scan_types[] = {
+    { "passive", BLE_HCI_SCAN_TYPE_PASSIVE },
+    { "active", BLE_HCI_SCAN_TYPE_ACTIVE },
+    { NULL }
+};
 
 static struct kv_pair cmd_scan_filt_policies[] = {
     { "no_wl", BLE_HCI_SCAN_FILT_NO_WL },
@@ -928,76 +802,36 @@ static struct kv_pair cmd_scan_filt_policies[] = {
     { NULL }
 };
 
-static struct kv_pair cmd_scan_addr_types[] = {
-    { "public",  BLE_ADDR_TYPE_PUBLIC },
-    { "random",  BLE_ADDR_TYPE_RANDOM },
-    { "rpa_pub", BLE_ADDR_TYPE_RPA_PUB_DEFAULT },
-    { "rpa_rnd", BLE_ADDR_TYPE_RPA_RND_DEFAULT },
-    { NULL }
-};
-
 static int
 cmd_scan(int argc, char **argv)
 {
-    struct ble_gap_disc_params params;
-    int32_t duration_ms;
-    uint8_t own_addr_type;
+    uint32_t dur;
+    int disc;
+    int type;
+    int filt;
     int rc;
 
-    if (argc > 1 && strcmp(argv[1], "cancel") == 0) {
-        rc = bletiny_scan_cancel();
-        if (rc != 0) {
-            console_printf("connection cancel fail: %d\n", rc);
-            return rc;
-        }
-
-        return 0;
-    }
-
-    duration_ms = parse_arg_long_bounds_default("dur", 1, INT32_MAX,
-                                                BLE_HS_FOREVER, &rc);
+    dur = parse_arg_uint16("dur", &rc);
     if (rc != 0) {
         return rc;
     }
 
-    params.limited = parse_arg_bool_default("ltd", 0, &rc);
-    if (rc != 0) {
-        return rc;
+    disc = parse_arg_kv("disc", cmd_scan_disc_modes);
+    if (disc == -1) {
+        return EINVAL;
     }
 
-    params.passive = parse_arg_bool_default("passive", 0, &rc);
-    if (rc != 0) {
-        return rc;
+    type = parse_arg_kv("type", cmd_scan_types);
+    if (type == -1) {
+        return EINVAL;
     }
 
-    params.itvl = parse_arg_uint16_dflt("itvl", 0, &rc);
-    if (rc != 0) {
-        return rc;
+    filt = parse_arg_kv("filt", cmd_scan_filt_policies);
+    if (disc == -1) {
+        return EINVAL;
     }
 
-    params.window = parse_arg_uint16_dflt("window", 0, &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    params.filter_policy = parse_arg_kv_default(
-        "filt", cmd_scan_filt_policies, BLE_HCI_SCAN_FILT_NO_WL, &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    params.filter_duplicates = parse_arg_bool_default("nodups", 0, &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    own_addr_type = parse_arg_kv_default("own_addr_type", cmd_scan_addr_types,
-                                         BLE_ADDR_TYPE_PUBLIC, &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    rc = bletiny_scan(own_addr_type, duration_ms, &params);
+    rc = bletiny_scan(dur, disc, type, filt);
     if (rc != 0) {
         console_printf("error scanning; rc=%d\n", rc);
         return rc;
@@ -1013,24 +847,7 @@ cmd_scan(int argc, char **argv)
 static int
 cmd_show_addr(int argc, char **argv)
 {
-    uint8_t id_addr[6];
-    int rc;
-
-    console_printf("public_id_addr=");
-    rc = ble_hs_id_copy_addr(BLE_ADDR_TYPE_PUBLIC, id_addr, NULL);
-    if (rc == 0) {
-        print_addr(id_addr);
-    } else {
-        console_printf("none");
-    }
-
-    console_printf(" random_id_addr=");
-    rc = ble_hs_id_copy_addr(BLE_ADDR_TYPE_RANDOM, id_addr, NULL);
-    if (rc == 0) {
-        print_addr(id_addr);
-    } else {
-        console_printf("none");
-    }
+    print_addr(g_dev_addr);
     console_printf("\n");
 
     return 0;
@@ -1046,7 +863,9 @@ cmd_show_chr(int argc, char **argv)
     for (i = 0; i < bletiny_num_conns; i++) {
         conn = bletiny_conns + i;
 
-        console_printf("CONNECTION: handle=%d\n", conn->handle);
+        console_printf("CONNECTION: handle=%d addr=", conn->handle);
+        print_addr(conn->addr);
+        console_printf("\n");
 
         SLIST_FOREACH(svc, &conn->svcs, next) {
             cmd_print_svc(svc);
@@ -1059,18 +878,15 @@ cmd_show_chr(int argc, char **argv)
 static int
 cmd_show_conn(int argc, char **argv)
 {
-    struct ble_gap_conn_desc conn_desc;
     struct bletiny_conn *conn;
-    int rc;
     int i;
 
     for (i = 0; i < bletiny_num_conns; i++) {
         conn = bletiny_conns + i;
 
-        rc = ble_gap_conn_find(conn->handle, &conn_desc);
-        if (rc == 0) {
-            print_conn_desc(&conn_desc);
-        }
+        console_printf("handle=%d addr=", conn->handle);
+        print_addr(conn->addr);
+        console_printf(" addr_type=%d\n", conn->addr_type);
     }
 
     return 0;
@@ -1101,26 +917,6 @@ cmd_show(int argc, char **argv)
  *****************************************************************************/
 
 static int
-cmd_sec_pair(int argc, char **argv)
-{
-    uint16_t conn_handle;
-    int rc;
-
-    conn_handle = parse_arg_uint16("conn", &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    rc = bletiny_sec_pair(conn_handle);
-    if (rc != 0) {
-        console_printf("error initiating pairing; rc=%d\n", rc);
-        return rc;
-    }
-
-    return 0;
-}
-
-static int
 cmd_sec_start(int argc, char **argv)
 {
     uint16_t conn_handle;
@@ -1141,7 +937,7 @@ cmd_sec_start(int argc, char **argv)
 }
 
 static int
-cmd_sec_enc(int argc, char **argv)
+cmd_sec_restart(int argc, char **argv)
 {
     uint16_t conn_handle;
     uint16_t ediv;
@@ -1156,39 +952,54 @@ cmd_sec_enc(int argc, char **argv)
     }
 
     ediv = parse_arg_uint16("ediv", &rc);
-    if (rc == ENOENT) {
-        rc = bletiny_sec_restart(conn_handle, NULL, 0, 0, 0);
-    } else {
-        rand_val = parse_arg_uint64("rand", &rc);
-        if (rc != 0) {
-            return rc;
-        }
-
-        auth = parse_arg_bool("auth", &rc);
-        if (rc != 0) {
-            return rc;
-        }
-
-        rc = parse_arg_byte_stream_exact_length("ltk", ltk, 16);
-        if (rc != 0) {
-            return rc;
-        }
-
-        rc = bletiny_sec_restart(conn_handle, ltk, ediv, rand_val, auth);
+    if (rc != 0) {
+        return rc;
     }
 
+    rand_val = parse_arg_uint64("rand", &rc);
     if (rc != 0) {
-        console_printf("error initiating encryption; rc=%d\n", rc);
+        return rc;
+    }
+
+    auth = parse_arg_bool("auth", &rc);
+    if (rc != 0) {
+        return rc;
+    }
+
+    rc = parse_arg_byte_stream_exact_length("ltk", ltk, 16);
+    if (rc != 0) {
+        return rc;
+    }
+
+    rc = bletiny_sec_restart( conn_handle, ltk, ediv, rand_val, auth);
+
+    if (rc != 0) {
+        console_printf("error starting encryption; rc=%d\n", rc);
         return rc;
     }
 
     return 0;
 }
 
+static int
+cmd_sec_ltk(int argc, char **argv)
+{
+    /* TODO */
+    return -1;
+}
+
+static int
+cmd_sec_request(int argc, char **argv)
+{
+    /* TODO */
+    return -1;
+}
+
 static struct cmd_entry cmd_sec_entries[] = {
-    { "pair", cmd_sec_pair },
     { "start", cmd_sec_start },
-    { "enc", cmd_sec_enc },
+    { "restart", cmd_sec_restart },
+    { "ltk", cmd_sec_ltk },
+    { "request", cmd_sec_request }
 };
 
 static int
@@ -1212,11 +1023,11 @@ cmd_sec(int argc, char **argv)
 #define CMD_ADV_DATA_MAX_UUIDS32                8
 #define CMD_ADV_DATA_MAX_UUIDS128               2
 #define CMD_ADV_DATA_MAX_PUBLIC_TGT_ADDRS       8
-#define CMD_ADV_DATA_SVC_DATA_UUID16_MAX_LEN    BLE_HS_ADV_MAX_FIELD_SZ
-#define CMD_ADV_DATA_SVC_DATA_UUID32_MAX_LEN    BLE_HS_ADV_MAX_FIELD_SZ
-#define CMD_ADV_DATA_SVC_DATA_UUID128_MAX_LEN   BLE_HS_ADV_MAX_FIELD_SZ
-#define CMD_ADV_DATA_URI_MAX_LEN                BLE_HS_ADV_MAX_FIELD_SZ
-#define CMD_ADV_DATA_MFG_DATA_MAX_LEN           BLE_HS_ADV_MAX_FIELD_SZ
+#define CMD_ADV_DATA_SVC_DATA_UUID16_MAX_LEN    32
+#define CMD_ADV_DATA_SVC_DATA_UUID32_MAX_LEN    32
+#define CMD_ADV_DATA_SVC_DATA_UUID128_MAX_LEN   32
+#define CMD_ADV_DATA_URI_MAX_LEN                32
+#define CMD_ADV_DATA_MFG_DATA_MAX_LEN           32
 
 static int
 cmd_set_adv_data(void)
@@ -1257,14 +1068,6 @@ cmd_set_adv_data(void)
     int rc;
 
     memset(&adv_fields, 0, sizeof adv_fields);
-
-    tmp = parse_arg_long_bounds("flags", 0, UINT8_MAX, &rc);
-    if (rc == 0) {
-        adv_fields.flags = tmp;
-        adv_fields.flags_is_present = 1;
-    } else if (rc != ENOENT) {
-        return rc;
-    }
 
     while (1) {
         uuid16 = parse_arg_uint16("uuid16", &rc);
@@ -1341,12 +1144,12 @@ cmd_set_adv_data(void)
         return rc;
     }
 
-    adv_fields.name = (uint8_t *)parse_arg_extract("name");
+    adv_fields.name = (uint8_t *)parse_arg_find("name");
     if (adv_fields.name != NULL) {
         adv_fields.name_len = strlen((char *)adv_fields.name);
     }
 
-    tmp = parse_arg_long_bounds("tx_pwr_lvl", INT8_MIN, INT8_MAX, &rc);
+    tmp = parse_arg_long_bounds("tx_pwr_lvl", 0, 0xff, &rc);
     if (rc == 0) {
         adv_fields.tx_pwr_lvl = tmp;
         adv_fields.tx_pwr_lvl_is_present = 1;
@@ -1470,7 +1273,7 @@ cmd_set_adv_data(void)
         return rc;
     }
 
-    eddystone_url_full = parse_arg_extract("eddystone_url");
+    eddystone_url_full = parse_arg_find("eddystone_url");
     if (eddystone_url_full != NULL) {
         rc = cmd_parse_eddystone_url(eddystone_url_full, &eddystone_url_scheme,
                                      eddystone_url_body,
@@ -1552,67 +1355,9 @@ cmd_set_sm_data(void)
         return rc;
     }
 
-    tmp = parse_arg_bool("sc", &rc);
-    if (rc == 0) {
-        good++;
-        ble_hs_cfg.sm_sc = tmp;
-    } else if (rc != ENOENT) {
-        return rc;
-    }
-
     if (!good) {
         console_printf("Error: no valid settings specified\n");
         return -1;
-    }
-
-    return 0;
-}
-
-static struct kv_pair cmd_set_addr_types[] = {
-    { "public",         BLE_ADDR_TYPE_PUBLIC },
-    { "random",         BLE_ADDR_TYPE_RANDOM },
-    { NULL }
-};
-
-static int
-cmd_set_addr(void)
-{
-    uint8_t addr[6];
-    int addr_type;
-    int rc;
-
-    addr_type = parse_arg_kv_default("addr_type", cmd_set_addr_types,
-                                     BLE_ADDR_TYPE_PUBLIC, &rc);
-    if (rc != 0) {
-        console_printf("invalid 'addr_type' parameter\n");
-        return rc;
-    }
-
-    rc = parse_arg_mac("addr", addr);
-    if (rc != 0) {
-        return rc;
-    }
-
-    switch (addr_type) {
-    case BLE_ADDR_TYPE_PUBLIC:
-        /* We shouldn't be writing to the controller's address (g_dev_addr).
-         * There is no standard way to set the local public address, so this is
-         * our only option at the moment.
-         */
-        memcpy(g_dev_addr, addr, 6);
-        ble_hs_id_set_pub(g_dev_addr);
-        break;
-
-    case BLE_ADDR_TYPE_RANDOM:
-        rc = ble_hs_id_set_rnd(addr);
-        if (rc != 0) {
-            return rc;
-        }
-        break;
-
-    default:
-        assert(0);
-        return BLE_HS_EUNKNOWN;
     }
 
     return 0;
@@ -1622,7 +1367,7 @@ static int
 cmd_set(int argc, char **argv)
 {
     uint16_t mtu;
-    uint8_t irk[16];
+    uint8_t addr[6];
     int good;
     int rc;
 
@@ -1638,14 +1383,16 @@ cmd_set(int argc, char **argv)
 
     good = 0;
 
-    rc = parse_arg_find_idx("addr");
-    if (rc != -1) {
-        rc = cmd_set_addr();
-        if (rc != 0) {
-            return rc;
-        }
-
+    rc = parse_arg_mac("addr", addr);
+    if (rc == 0) {
         good = 1;
+        /* XXX: There are a lot of problems with this.  This command probably
+         * needs to be removed.
+         */
+        memcpy(g_dev_addr, addr, 6);
+        memcpy(ble_hs_our_dev.public_addr, addr, 6);
+    } else if (rc != ENOENT) {
+        return rc;
     }
 
     mtu = parse_arg_uint16("mtu", &rc);
@@ -1654,14 +1401,6 @@ cmd_set(int argc, char **argv)
         if (rc == 0) {
             good = 1;
         }
-    } else if (rc != ENOENT) {
-        return rc;
-    }
-
-    rc = parse_arg_byte_stream_exact_length("irk", irk, 16);
-    if (rc == 0) {
-        good = 1;
-        ble_hs_pvcy_set_our_irk(irk);
     } else if (rc != ENOENT) {
         return rc;
     }
@@ -1682,7 +1421,6 @@ static int
 cmd_term(int argc, char **argv)
 {
     uint16_t conn_handle;
-    uint8_t reason;
     int rc;
 
     conn_handle = parse_arg_uint16("conn", &rc);
@@ -1690,12 +1428,7 @@ cmd_term(int argc, char **argv)
         return rc;
     }
 
-    reason = parse_arg_uint8_dflt("reason", BLE_ERR_REM_USER_CONN_TERM, &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    rc = bletiny_term_conn(conn_handle, reason);
+    rc = bletiny_term_conn(conn_handle);
     if (rc != 0) {
         console_printf("error terminating connection; rc=%d\n", rc);
         return rc;
@@ -1795,9 +1528,9 @@ cmd_wl(int argc, char **argv)
             return rc;
         }
 
-        addr_type = parse_arg_kv("addr_type", cmd_wl_addr_types, &rc);
-        if (rc != 0) {
-            return rc;
+        addr_type = parse_arg_kv("addr_type", cmd_wl_addr_types);
+        if (addr_type == -1) {
+            return EINVAL;
         }
 
         memcpy(white_list[wl_cnt].addr, addr, 6);
@@ -1818,10 +1551,12 @@ cmd_wl(int argc, char **argv)
  * $write                                                                    *
  *****************************************************************************/
 
+#define CMD_WRITE_MAX_ATTRS 16
+
 static int
 cmd_write(int argc, char **argv)
 {
-    struct ble_gatt_attr attrs[NIMBLE_OPT(GATT_WRITE_MAX_ATTRS)] = { { 0 } };
+    static struct ble_gatt_attr attrs[CMD_WRITE_MAX_ATTRS];
     uint16_t attr_handle;
     uint16_t conn_handle;
     int total_attr_len;
@@ -1830,7 +1565,6 @@ cmd_write(int argc, char **argv)
     int is_long;
     int no_rsp;
     int rc;
-    int i;
 
     conn_handle = parse_arg_uint16("conn", &rc);
     if (rc != 0) {
@@ -1858,8 +1592,7 @@ cmd_write(int argc, char **argv)
         if (rc == ENOENT) {
             break;
         } else if (rc != 0) {
-            rc = -rc;
-            goto done;
+            return rc;
         }
 
         rc = parse_arg_byte_stream("value", sizeof cmd_buf - total_attr_len,
@@ -1867,21 +1600,17 @@ cmd_write(int argc, char **argv)
         if (rc == ENOENT) {
             break;
         } else if (rc != 0) {
-            goto done;
+            return rc;
         }
 
-        if (num_attrs >= sizeof attrs / sizeof attrs[0]) {
-            rc = -EINVAL;
-            goto done;
+        if (num_attrs >= CMD_WRITE_MAX_ATTRS) {
+            return EINVAL;
         }
 
         attrs[num_attrs].handle = attr_handle;
         attrs[num_attrs].offset = 0;
-        attrs[num_attrs].om = ble_hs_mbuf_from_flat(cmd_buf + total_attr_len,
-                                                    attr_len);
-        if (attrs[num_attrs].om == NULL) {
-            goto done;
-        }
+        attrs[num_attrs].value_len = attr_len;
+        attrs[num_attrs].value = cmd_buf + total_attr_len;
 
         total_attr_len += attr_len;
         num_attrs++;
@@ -1889,271 +1618,33 @@ cmd_write(int argc, char **argv)
 
     if (no_rsp) {
         if (num_attrs != 1) {
-            rc = -EINVAL;
-            goto done;
+            return EINVAL;
         }
-        rc = bletiny_write_no_rsp(conn_handle, attrs[0].handle, attrs[0].om);
-        attrs[0].om = NULL;
+        rc = bletiny_write_no_rsp(conn_handle, attrs[0].handle,
+                                   attrs[0].value, attrs[0].value_len);
     } else if (is_long) {
         if (num_attrs != 1) {
-            rc = -EINVAL;
-            goto done;
+            return EINVAL;
         }
-        rc = bletiny_write_long(conn_handle, attrs[0].handle, attrs[0].om);
-        attrs[0].om = NULL;
+        rc = bletiny_write_long(conn_handle, attrs[0].handle,
+                                attrs[0].value, attrs[0].value_len);
     } else if (num_attrs > 1) {
         rc = bletiny_write_reliable(conn_handle, attrs, num_attrs);
     } else if (num_attrs == 1) {
-        rc = bletiny_write(conn_handle, attrs[0].handle, attrs[0].om);
-        attrs[0].om = NULL;
+        rc = bletiny_write(conn_handle, attrs[0].handle,
+                           attrs[0].value, attrs[0].value_len);
     } else {
-        rc = -EINVAL;
-    }
-
-done:
-    for (i = 0; i < sizeof attrs / sizeof attrs[0]; i++) {
-        os_mbuf_free_chain(attrs[i].om);
+        return EINVAL;
     }
 
     if (rc != 0) {
         console_printf("error writing characteristic; rc=%d\n", rc);
-    }
-
-    return rc;
-}
-
-/*****************************************************************************
- * store                                                                     *
- *****************************************************************************/
-
-static struct kv_pair cmd_keystore_entry_type[] = {
-    { "msec",       BLE_STORE_OBJ_TYPE_PEER_SEC },
-    { "ssec",       BLE_STORE_OBJ_TYPE_OUR_SEC },
-    { "cccd",       BLE_STORE_OBJ_TYPE_CCCD },
-    { NULL }
-};
-
-static struct kv_pair cmd_keystore_addr_type[] = {
-    { "public",     BLE_ADDR_TYPE_PUBLIC },
-    { "random",     BLE_ADDR_TYPE_RANDOM },
-    { NULL }
-};
-
-static int
-cmd_keystore_parse_keydata(int argc, char **argv, union ble_store_key *out,
-                           int *obj_type)
-{
-    int rc;
-
-    memset(out, 0, sizeof(*out));
-    *obj_type = parse_arg_kv("type", cmd_keystore_entry_type, &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    switch (*obj_type) {
-    case BLE_STORE_OBJ_TYPE_PEER_SEC:
-    case BLE_STORE_OBJ_TYPE_OUR_SEC:
-        rc = parse_arg_kv("addr_type", cmd_keystore_addr_type, &rc);
-        if (rc != 0) {
-            return rc;
-        }
-
-        rc = parse_arg_mac("addr", out->sec.peer_addr);
-        if (rc != 0) {
-            return rc;
-        }
-
-        out->sec.ediv = parse_arg_uint16("ediv", &rc);
-        if (rc != 0) {
-            return rc;
-        }
-
-        out->sec.rand_num = parse_arg_uint64("rand", &rc);
-        if (rc != 0) {
-            return rc;
-        }
-        return 0;
-
-    default:
-        return EINVAL;
-    }
-}
-
-static int
-cmd_keystore_parse_valuedata(int argc, char **argv,
-                             int obj_type,
-                             union ble_store_key *key,
-                             union ble_store_value *out)
-{
-    int rc;
-    int valcnt = 0;
-    memset(out, 0, sizeof(*out));
-
-    switch (obj_type) {
-        case BLE_STORE_OBJ_TYPE_PEER_SEC:
-        case BLE_STORE_OBJ_TYPE_OUR_SEC:
-            rc = parse_arg_byte_stream_exact_length("ltk", out->sec.ltk, 16);
-            if (rc == 0) {
-                out->sec.ltk_present = 1;
-                swap_in_place(out->sec.ltk, 16);
-                valcnt++;
-            } else if (rc != ENOENT) {
-                return rc;
-            }
-            rc = parse_arg_byte_stream_exact_length("irk", out->sec.irk, 16);
-            if (rc == 0) {
-                out->sec.irk_present = 1;
-                swap_in_place(out->sec.irk, 16);
-                valcnt++;
-            } else if (rc != ENOENT) {
-                return rc;
-            }
-            rc = parse_arg_byte_stream_exact_length("csrk", out->sec.csrk, 16);
-            if (rc == 0) {
-                out->sec.csrk_present = 1;
-                swap_in_place(out->sec.csrk, 16);
-                valcnt++;
-            } else if (rc != ENOENT) {
-                return rc;
-            }
-            out->sec.peer_addr_type = key->sec.peer_addr_type;
-            memcpy(out->sec.peer_addr, key->sec.peer_addr, 6);
-            out->sec.ediv = key->sec.ediv;
-            out->sec.rand_num = key->sec.rand_num;
-            break;
-    }
-
-    if (valcnt) {
-        return 0;
-    }
-    return -1;
-}
-
-static int
-cmd_keystore_add(int argc, char **argv)
-{
-    union ble_store_key key;
-    union ble_store_value value;
-    int obj_type;
-    int rc;
-
-    rc = cmd_keystore_parse_keydata(argc, argv, &key, &obj_type);
-
-    if (rc) {
-        return rc;
-    }
-
-    rc = cmd_keystore_parse_valuedata(argc, argv, obj_type, &key, &value);
-
-    if (rc) {
-        return rc;
-    }
-
-    switch(obj_type) {
-        case BLE_STORE_OBJ_TYPE_PEER_SEC:
-            rc = ble_store_write_peer_sec(&value.sec);
-            break;
-        case BLE_STORE_OBJ_TYPE_OUR_SEC:
-            rc = ble_store_write_our_sec(&value.sec);
-            break;
-        case BLE_STORE_OBJ_TYPE_CCCD:
-            rc = ble_store_write_cccd(&value.cccd);
-            break;
-        default:
-            rc = ble_store_write(obj_type, &value);
-    }
-    return rc;
-}
-
-static int
-cmd_keystore_del(int argc, char **argv)
-{
-    union ble_store_key key;
-    int obj_type;
-    int rc;
-
-    rc = cmd_keystore_parse_keydata(argc, argv, &key, &obj_type);
-
-    if (rc) {
-        return rc;
-    }
-    rc = ble_store_delete(obj_type, &key);
-    return rc;
-}
-
-static int
-cmd_keystore_iterator(int obj_type,
-                      union ble_store_value *val,
-                      void *cookie) {
-
-    switch (obj_type) {
-        case BLE_STORE_OBJ_TYPE_PEER_SEC:
-        case BLE_STORE_OBJ_TYPE_OUR_SEC:
-            console_printf("Key: ");
-            if (val->sec.peer_addr_type == BLE_STORE_ADDR_TYPE_NONE) {
-                console_printf("ediv=%u ", val->sec.ediv);
-                console_printf("ediv=%llu ", val->sec.rand_num);
-            } else {
-                console_printf("addr_type=%u ", val->sec.peer_addr_type);
-                print_addr(val->sec.peer_addr);
-            }
-            console_printf("\n");
-
-            if (val->sec.ltk_present) {
-                console_printf("    LTK: ");
-                print_bytes(val->sec.ltk, 16);
-                console_printf("\n");
-            }
-            if (val->sec.irk_present) {
-                console_printf("    IRK: ");
-                print_bytes(val->sec.irk, 16);
-                console_printf("\n");
-            }
-            if (val->sec.csrk_present) {
-                console_printf("    CSRK: ");
-                print_bytes(val->sec.csrk, 16);
-                console_printf("\n");
-            }
-            break;
-    }
-    return 0;
-}
-
-static int
-cmd_keystore_show(int argc, char **argv)
-{
-    int type;
-    int rc;
-
-    type = parse_arg_kv("type", cmd_keystore_entry_type, &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    ble_store_iterate(type, &cmd_keystore_iterator, NULL);
-    return 0;
-}
-
-static struct cmd_entry cmd_keystore_entries[] = {
-    { "add", cmd_keystore_add },
-    { "del", cmd_keystore_del },
-    { "show", cmd_keystore_show },
-    { NULL, NULL }
-};
-
-static int
-cmd_keystore(int argc, char **argv)
-{
-    int rc;
-
-    rc = cmd_exec(cmd_keystore_entries, argc, argv);
-    if (rc != 0) {
         return rc;
     }
 
     return 0;
 }
+
 
 /*****************************************************************************
  * $passkey                                                                  *
@@ -2167,8 +1658,7 @@ cmd_passkey(int argc, char **argv)
 #endif
 
     uint16_t conn_handle;
-    struct ble_sm_io pk;
-    char *yesno;
+    struct ble_l2cap_sm_passkey pk;
     int rc;
 
     conn_handle = parse_arg_uint16("conn", &rc);
@@ -2181,9 +1671,9 @@ cmd_passkey(int argc, char **argv)
         return rc;
     }
 
-    switch (pk.action) {
-        case BLE_SM_IOACT_INPUT:
-        case BLE_SM_IOACT_DISP:
+    switch(pk.action) {
+        case BLE_GAP_PKACT_INPUT:
+        case BLE_GAP_PKACT_DISP:
            /* passkey is 6 digit number */
            pk.passkey = parse_arg_long_bounds("key", 0, 999999, &rc);
            if (rc != 0) {
@@ -2191,89 +1681,24 @@ cmd_passkey(int argc, char **argv)
            }
            break;
 
-        case BLE_SM_IOACT_OOB:
+        case BLE_GAP_PKACT_OOB:
             rc = parse_arg_byte_stream_exact_length("oob", pk.oob, 16);
             if (rc != 0) {
                 return rc;
             }
             break;
-
-        case BLE_SM_IOACT_NUMCMP:
-            yesno = parse_arg_extract("yesno");
-            if (yesno == NULL) {
-                return EINVAL;
-            }
-
-            switch (yesno[0]) {
-            case 'y':
-            case 'Y':
-                pk.numcmp_accept = 1;
-                break;
-            case 'n':
-            case 'N':
-                pk.numcmp_accept = 0;
-                break;
-
-            default:
-                return EINVAL;
-            }
-            break;
-
        default:
          console_printf("invalid passkey action action=%d\n", pk.action);
          return EINVAL;
     }
 
-    rc = ble_sm_inject_io(conn_handle, &pk);
+    rc = ble_l2cap_sm_set_tk(conn_handle, &pk);
     if (rc != 0) {
         console_printf("error providing passkey; rc=%d\n", rc);
         return rc;
     }
 
     return 0;
-}
-
-/*****************************************************************************
- * $tx                                                                     *
- *                                                                         *
- * Command to transmit 'num' packets of size 'len' at rate 'r' to
- * handle 'h' Note that length must be <= 251. The rate is in msecs.
- *
- *****************************************************************************/
-static int
-cmd_tx(int argc, char **argv)
-{
-    int rc;
-    uint16_t rate;
-    uint16_t len;
-    uint16_t handle;
-    uint16_t num;
-
-    rate = parse_arg_uint16("r", &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    len = parse_arg_uint16("l", &rc);
-    if (rc != 0) {
-        return rc;
-    }
-    if ((len > 251) || (len < 4)) {
-        console_printf("error: len must be between 4 and 251, inclusive");
-    }
-
-    num = parse_arg_uint16("n", &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    handle = parse_arg_uint16("h", &rc);
-    if (rc != 0) {
-        return rc;
-    }
-
-    rc = bletiny_tx_start(handle, len, rate, num);
-    return rc;
 }
 
 /*****************************************************************************
@@ -2284,22 +1709,18 @@ static struct cmd_entry cmd_b_entries[] = {
     { "adv",        cmd_adv },
     { "conn",       cmd_conn },
     { "chrup",      cmd_chrup },
-    { "datalen",    cmd_datalen },
     { "disc",       cmd_disc },
     { "find",       cmd_find },
     { "l2cap",      cmd_l2cap },
     { "mtu",        cmd_mtu },
     { "passkey",    cmd_passkey },
     { "read",       cmd_read },
-    { "rssi",       cmd_rssi },
     { "scan",       cmd_scan },
     { "show",       cmd_show },
     { "sec",        cmd_sec },
     { "set",        cmd_set },
-    { "store",      cmd_keystore },
     { "term",       cmd_term },
     { "update",     cmd_update },
-    { "tx",         cmd_tx },
     { "wl",         cmd_wl },
     { "write",      cmd_write },
     { NULL, NULL }

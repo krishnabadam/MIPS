@@ -20,9 +20,12 @@
 #ifndef __BOOTUTIL_MISC_H_
 #define __BOOTUTIL_MISC_H_
 
-int boot_vect_read_test(int *slot);
-int boot_vect_read_main(int *slot);
-int boot_vect_write_test(int slot);
-int boot_vect_write_main(void);
+struct image_version;
+int boot_vect_read_test(struct image_version *out_ver);
+int boot_vect_read_main(struct image_version *out_ver);
+int boot_vect_write_test(struct image_version *ver);
+int boot_vect_write_main(struct image_version *ver);
+
+void bootutil_cfg_register(void);
 
 #endif /*  __BOOTUTIL_MISC_H_ */

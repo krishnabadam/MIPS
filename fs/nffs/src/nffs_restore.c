@@ -56,10 +56,6 @@ nffs_restore_validate_block_chain(struct nffs_hash_entry *last_block_entry)
     cur = last_block_entry;
 
     while (cur != NULL) {
-        if (nffs_hash_entry_is_dummy(cur)) {
-            return FS_ENOENT;
-        }
-
         nffs_flash_loc_expand(cur->nhe_flash_loc, &area_idx, &area_offset);
 
         rc = nffs_block_read_disk(area_idx, area_offset, &disk_block);
@@ -81,27 +77,27 @@ nffs_restore_validate_block_chain(struct nffs_hash_entry *last_block_entry)
 static void
 u32toa(char *dst, uint32_t val)
 {
-    uint8_t tmp;
-    int idx = 0;
-    int i;
-    int print = 0;
+	uint8_t tmp;
+	int idx = 0;
+	int i;
+	int print = 0;
 
-    for (i = 0; i < 8; i++) {
-        tmp = val >> 28;
-        if (tmp || i == 7) {
-            print = 1;
-        }
-        if (tmp < 10) {
-            tmp += '0';
-        } else {
-            tmp += 'a' - 10;
-        }
-        if (print) {
-            dst[idx++] = tmp;
-        }
-        val <<= 4;
-    }
-    dst[idx++] = '\0';
+	for (i = 0; i < 8; i++) {
+		tmp = val >> 28;
+		if (tmp || i == 7) {
+			print = 1;
+		}
+		if (tmp < 10) {
+			tmp += '0';
+		} else {
+			tmp += 'a' - 10;
+		}
+		if (print) {
+			dst[idx++] = tmp;
+		}
+		val <<= 4;
+	}
+	dst[idx++] = '\0';
 }
 
 /**
@@ -125,7 +121,7 @@ nffs_restore_migrate_orphan_children(struct nffs_inode_entry *inode_entry)
         return 0;
     }
 
-    if (!nffs_inode_is_dummy(inode_entry)) {
+    if (inode_entry->nie_refcnt != 0) {
         /* Not a dummy. */
         return 0;
     }
@@ -164,44 +160,16 @@ nffs_restore_should_sweep_inode_entry(struct nffs_inode_entry *inode_entry,
     struct nffs_inode inode;
     int rc;
 
-
-    /*
-     * if this inode was tagged to have a dummy block entry and the
-     * flag is still set, that means we didn't find the block and so
-     * should remove this inode and all associated blocks.
+    /* Determine if the inode is a dummy.  Dummy inodes have a reference count
+     * of 0.  If it is a dummy, increment its reference count back to 1 so that
+     * it can be properly deleted.  The presence of a dummy inode during the
+     * final sweep step indicates file system corruption.  If the inode is a
+     * directory, all its children should have been migrated to the /lost+found
+     * directory prior to this.
      */
-    if (nffs_inode_getflags(inode_entry, NFFS_INODE_FLAG_DUMMYLSTBLK)) {
+    if (inode_entry->nie_refcnt == 0) {
         *out_should_sweep = 1;
-        /*nffs_inode_inc_refcnt(inode_entry);*/
-        inode_entry->nie_refcnt = 1;
-        assert(inode_entry->nie_refcnt >= 1);
-        return 0;
-    }
-
-    /*
-     * This inode was originally created to hold a block that was restored
-     * before the owning inode. If the flag is still set, it means we never
-     * restored the inode from disk and so this entry should be deleted.
-     */
-    if (nffs_inode_getflags(inode_entry, NFFS_INODE_FLAG_DUMMYINOBLK)) {
-        *out_should_sweep = 2;
-        /*nffs_inode_inc_refcnt(inode_entry);*/
-        inode_entry->nie_refcnt = 1;
-        assert(inode_entry->nie_refcnt >= 1);
-        return 0;
-    }
-
-    /*
-     * Determine if the inode is a dummy. Dummy inodes have a flash
-     * location set to LOC_NONE and should have a flag set for the reason.
-     * The presence of a dummy inode during the final sweep step indicates
-     * file system corruption.  It's assumed that directories have
-     * previously migrated all children to /lost+found.
-     */
-    if (nffs_inode_is_dummy(inode_entry)) {
-        *out_should_sweep = 3;
-        nffs_inode_inc_refcnt(inode_entry);
-        assert(inode_entry->nie_refcnt >= 1);
+        inode_entry->nie_refcnt++;
         return 0;
     }
 
@@ -211,30 +179,15 @@ nffs_restore_should_sweep_inode_entry(struct nffs_inode_entry *inode_entry,
      */
     if (inode_entry->nie_hash_entry.nhe_id != NFFS_ID_ROOT_DIR) {
         rc = nffs_inode_from_entry(&inode, inode_entry);
-        if (rc != 0 && rc != FS_ENOENT) {
-            *out_should_sweep = 0;
-            return rc;
-        }
-        if (inode.ni_parent == NULL) {
-            *out_should_sweep = 4;
-            return 0;
-        }
-    }
-
-    /*
-     * If this inode has been marked as deleted, we can unlink it here.
-     *
-     * XXX Note that the record of a deletion could be lost if garbage
-     * collection erases the delete but leaves inode updates on other
-     * partitions which can then be restored.
-     */
-    if (nffs_inode_getflags(inode_entry, NFFS_INODE_FLAG_DELETED)) {
-        rc = nffs_inode_from_entry(&inode, inode_entry);
         if (rc != 0) {
             *out_should_sweep = 0;
             return rc;
         }
-        *out_should_sweep = 5;
+
+        if (inode.ni_parent == NULL) {
+            *out_should_sweep = 1;
+            return 0;
+        }
     }
 
     /* If this is a file inode, verify that all of its constituent blocks are
@@ -244,10 +197,7 @@ nffs_restore_should_sweep_inode_entry(struct nffs_inode_entry *inode_entry,
         rc = nffs_restore_validate_block_chain(
                 inode_entry->nie_last_block_entry);
         if (rc == FS_ECORRUPT) {
-            *out_should_sweep = 6;
-            return 0;
-        } else if (rc == FS_ENOENT) {
-            *out_should_sweep = 7;
+            *out_should_sweep = 1;
             return 0;
         } else if (rc != 0) {
             *out_should_sweep = 0;
@@ -257,6 +207,85 @@ nffs_restore_should_sweep_inode_entry(struct nffs_inode_entry *inode_entry,
 
     /* This is a valid inode; don't sweep it. */
     *out_should_sweep = 0;
+    return 0;
+}
+
+static void
+nffs_restore_inode_from_dummy_entry(struct nffs_inode *out_inode,
+                                    struct nffs_inode_entry *inode_entry)
+{
+    memset(out_inode, 0, sizeof *out_inode);
+    out_inode->ni_inode_entry = inode_entry;
+}
+
+static int
+nffs_restore_find_file_end_block(struct nffs_hash_entry *block_entry)
+{
+    struct nffs_inode_entry *inode_entry;
+    struct nffs_block block;
+    int rc;
+
+    rc = nffs_block_from_hash_entry(&block, block_entry);
+    assert(rc == 0);
+
+    inode_entry = block.nb_inode_entry;
+
+    /* Make sure the parent inode (file) points to the latest data block
+     * restored so far.
+     *
+     * XXX: This is an O(n) operation (n = # of blocks in the file), and is
+     * horribly inefficient for large files.  MYNEWT-161 has been opened to
+     * address this.
+     */
+    if (inode_entry->nie_last_block_entry == NULL) {
+        /* This is the first data block restored for this file. */
+        inode_entry->nie_last_block_entry = block_entry;
+        NFFS_LOG(DEBUG, "setting last block: %u\n", block_entry->nhe_id);
+    } else {
+        /* Determine if this this data block comes after our current idea of
+         * the file's last data block.
+         */
+
+        rc = nffs_block_find_predecessor(
+            block_entry, inode_entry->nie_last_block_entry->nhe_id);
+        switch (rc) {
+        case 0:
+            /* The currently-last block is a predecessor of the new block; the
+             * new block comes later.
+             */
+            NFFS_LOG(DEBUG, "replacing last block: %u --> %u\n",
+                     inode_entry->nie_last_block_entry->nhe_id,
+                     block_entry->nhe_id);
+            inode_entry->nie_last_block_entry = block_entry;
+            break;
+
+        case FS_ENOENT:
+            break;
+
+        default:
+            return rc;
+        }
+    }
+
+    return 0;
+}
+
+
+static int
+nffs_restore_find_file_ends(void)
+{
+    struct nffs_hash_entry *block_entry;
+    struct nffs_hash_entry *next;
+    int rc;
+    int i;
+
+    NFFS_HASH_FOREACH(block_entry, i, next) {
+        if (!nffs_hash_id_is_inode(block_entry->nhe_id)) {
+            rc = nffs_restore_find_file_end_block(block_entry);
+            assert(rc == 0);
+        }
+    }
+
     return 0;
 }
 
@@ -281,8 +310,7 @@ nffs_restore_sweep(void)
     struct nffs_hash_entry *next;
     struct nffs_hash_list *list;
     struct nffs_inode inode;
-    struct nffs_block block;
-    int del = 0;
+    int del;
     int rc;
     int i;
 
@@ -298,10 +326,9 @@ nffs_restore_sweep(void)
             if (nffs_hash_id_is_inode(entry->nhe_id)) {
                 inode_entry = (struct nffs_inode_entry *)entry;
 
-                /*
-                 * If this is a dummy inode directory, the file system
-                 * is corrupt.  Move the directory's children inodes to
-                 * the lost+found directory.
+                /* If this is a dummy inode directory, the file system is
+                 * corrupted.  Move the directory's children inodes to the
+                 * lost+found directory.
                  */
                 rc = nffs_restore_migrate_orphan_children(inode_entry);
                 if (rc != 0) {
@@ -314,12 +341,18 @@ nffs_restore_sweep(void)
                     return rc;
                 }
 
-                rc = nffs_inode_from_entry(&inode, inode_entry);
-                if (rc != 0 && rc != FS_ENOENT) {
-                    return rc;
-                }
-
                 if (del) {
+                    if (inode_entry->nie_hash_entry.nhe_flash_loc ==
+                        NFFS_FLASH_LOC_NONE) {
+
+                        nffs_restore_inode_from_dummy_entry(&inode,
+                                                           inode_entry);
+                    } else {
+                        rc = nffs_inode_from_entry(&inode, inode_entry);
+                        if (rc != 0) {
+                            return rc;
+                        }
+                    }
 
                     /* Remove the inode and all its children from RAM.  We
                      * expect some file system corruption; the children are
@@ -331,21 +364,6 @@ nffs_restore_sweep(void)
                     if (rc != 0) {
                         return rc;
                     }
-                    next = SLIST_FIRST(list);
-                }
-            } else if (nffs_hash_id_is_block(entry->nhe_id)) {
-                if (nffs_hash_id_is_dummy(entry->nhe_id)) {
-                    del = 1;
-                    nffs_block_delete_from_ram(entry);
-                } else {
-                    rc = nffs_block_from_hash_entry(&block, entry);
-                    if (rc != 0 && rc != FS_ENOENT) {
-                        del = 1;
-                        nffs_block_delete_from_ram(entry);
-                    }
-                }
-                if (del) {
-                    del = 0;
                     next = SLIST_FIRST(list);
                 }
             }
@@ -362,8 +380,7 @@ nffs_restore_sweep(void)
  * a temporary placeholder for a real inode that has not been restored yet.
  * These are necessary so that the inter-object links can be maintained until
  * the absent inode is eventually restored.  Dummy inodes are identified by a
- * inaccessible flash location (NFFS_FLASH_LOC_NONE). When the real inode
- * is restored, this flash location will be udpated.
+ * reference count of 0.
  *
  * @param id                    The ID of the dummy inode to create.
  * @param out_inode_entry       On success, the dummy inode gets written here.
@@ -383,8 +400,6 @@ nffs_restore_dummy_inode(uint32_t id,
     inode_entry->nie_hash_entry.nhe_id = id;
     inode_entry->nie_hash_entry.nhe_flash_loc = NFFS_FLASH_LOC_NONE;
     inode_entry->nie_refcnt = 0;
-    inode_entry->nie_last_block_entry = NULL; /* lastblock not available yet */
-    nffs_inode_setflags(inode_entry, NFFS_INODE_FLAG_DUMMY);
 
     nffs_hash_insert(&inode_entry->nie_hash_entry);
 
@@ -416,19 +431,8 @@ nffs_restore_inode_gets_replaced(struct nffs_inode_entry *old_inode_entry,
 
     assert(old_inode_entry->nie_hash_entry.nhe_id == disk_inode->ndi_id);
 
-
-    if (nffs_inode_is_dummy(old_inode_entry)) {
-        NFFS_LOG(DEBUG, "inode_gets_replaced dummy!\n");
+    if (old_inode_entry->nie_refcnt == 0) {
         *out_should_replace = 1;
-        return 0;
-    }
-
-    /*
-     * inode is known to be obsolete and needs to be replaced no matter what
-     */
-    if (nffs_inode_getflags(old_inode_entry, NFFS_INODE_FLAG_OBSOLETE)) {
-        NFFS_LOG(DEBUG, "inode_gets_replaced obsolete\n");
-        *out_should_replace = 2;
         return 0;
     }
 
@@ -439,8 +443,7 @@ nffs_restore_inode_gets_replaced(struct nffs_inode_entry *old_inode_entry,
     }
 
     if (old_inode.ni_seq < disk_inode->ndi_seq) {
-        NFFS_LOG(DEBUG, "inode_gets_replaced seq\n");
-        *out_should_replace = 3;
+        *out_should_replace = 1;
         return 0;
     }
 
@@ -449,7 +452,7 @@ nffs_restore_inode_gets_replaced(struct nffs_inode_entry *old_inode_entry,
          * happen.
          */
         *out_should_replace = 0;
-        return FS_EEXIST;
+        return FS_ECORRUPT;
     }
 
     *out_should_replace = 0;
@@ -473,7 +476,6 @@ nffs_restore_inode(const struct nffs_disk_inode *disk_inode, uint8_t area_idx,
     struct nffs_inode_entry *inode_entry;
     struct nffs_inode_entry *parent;
     struct nffs_inode inode;
-    struct nffs_hash_entry *lastblock_entry = NULL;
     int new_inode;
     int do_add;
     int rc;
@@ -487,114 +489,29 @@ nffs_restore_inode(const struct nffs_disk_inode *disk_inode, uint8_t area_idx,
     }
 
     inode_entry = nffs_hash_find_inode(disk_inode->ndi_id);
-
-    /*
-     * Inode has already been restored. Determine whether this version
-     * from disk should replace the previous version referenced in RAM.
-     */
     if (inode_entry != NULL) {
-
-        if (disk_inode->ndi_flags & NFFS_INODE_FLAG_DELETED) {
-            /*
-             * Restore this inode even though deleted on disk
-             * so the additional restored blocks have a place to go
-             */
-            NFFS_LOG(DEBUG, "restoring deleted inode %x\n",
-                     (unsigned int)disk_inode->ndi_id);
-            nffs_inode_setflags(inode_entry, NFFS_INODE_FLAG_DELETED);
-        }
-
-        /*
-         * inodes get replaced if they're dummy entries (i.e. allocated
-         * as place holders until the actual inode is restored), or this is
-         * a more recent version of the inode which supercedes the old.
-         */
-        rc = nffs_restore_inode_gets_replaced(inode_entry, disk_inode, &do_add);
+        rc = nffs_restore_inode_gets_replaced(inode_entry, disk_inode,
+                                              &do_add);
         if (rc != 0) {
             goto err;
         }
 
-        if (do_add) { /* replace in this case */
-            if (!nffs_inode_is_dummy(inode_entry)) {
-                /*
-                 * if it's not a dummy, read block from flash
-                 */
+        if (do_add) {
+            if (inode_entry->nie_hash_entry.nhe_flash_loc !=
+                NFFS_FLASH_LOC_NONE) {
+
                 rc = nffs_inode_from_entry(&inode, inode_entry);
                 if (rc != 0) {
                     return rc;
                 }
-
-                /*
-                 * inode is known to be obsolete
-                 */
-                if (nffs_inode_getflags(inode_entry, 
-                                        NFFS_INODE_FLAG_OBSOLETE)) {
-                    nffs_inode_unsetflags(inode_entry,
-                                          NFFS_INODE_FLAG_OBSOLETE);
-                }
-
                 if (inode.ni_parent != NULL) {
                     nffs_inode_remove_child(&inode);
                 }
-
-                /*
-                 * If this is a delete record, subsequent inode and restore
-                 * records from flash may be ignored.
-                 * If the parent is NULL, this inode has been deleted. (old)
-                 * XXX if we could count on delete records for every inode,
-                 * we wouldn't need to check for the root directory looking
-                 * like a delete record because of it's parent ID.
-                 */
-                if (inode_entry->nie_hash_entry.nhe_id != NFFS_ID_ROOT_DIR) {
-                    if (disk_inode->ndi_flags & NFFS_INODE_FLAG_DELETED ||
-                        disk_inode->ndi_parent_id == NFFS_ID_NONE) {
-
-                        nffs_inode_setflags(inode_entry,
-                                            NFFS_INODE_FLAG_DELETED);
-                    }
-                }
-
-            } else {
-                /*
-                 * The existing inode entry was added as dummy.
-                 * The restore operation clears that state.
-                 */
-
-                /* If it's a directory, it was added as a parent to
-                 * one of it's children who were restored first.
-                 */
-                if (nffs_inode_getflags(inode_entry, 
-                                         NFFS_INODE_FLAG_DUMMYPARENT)) {
-                    assert(nffs_hash_id_is_dir(inode_entry->nie_hash_entry.nhe_id));
-                    nffs_inode_unsetflags(inode_entry, 
-                                         NFFS_INODE_FLAG_DUMMYPARENT);
-                }
-
-                /*
-                 * If it's a file, it was added to store a lastblock
-                 */
-                if (nffs_inode_getflags(inode_entry, 
-                                         NFFS_INODE_FLAG_DUMMYINOBLK)) {
-                    assert(nffs_hash_id_is_file(inode_entry->nie_hash_entry.nhe_id));
-                    nffs_inode_unsetflags(inode_entry, 
-                                         NFFS_INODE_FLAG_DUMMYINOBLK);
-                }
-
-                /*
-                 * Also, since it's a dummy, clear this flag too
-                 */
-                if (nffs_inode_getflags(inode_entry, NFFS_INODE_FLAG_DUMMY)) {
-                    nffs_inode_unsetflags(inode_entry, NFFS_INODE_FLAG_DUMMY);
-                }
             }
  
-            /*
-             * Update location to reference new location in flash
-             */
             inode_entry->nie_hash_entry.nhe_flash_loc =
-                                    nffs_flash_loc(area_idx, area_offset);
+                nffs_flash_loc(area_idx, area_offset);
         }
-        
     } else {
         inode_entry = nffs_inode_entry_alloc();
         if (inode_entry == NULL) {
@@ -606,89 +523,19 @@ nffs_restore_inode(const struct nffs_disk_inode *disk_inode, uint8_t area_idx,
 
         inode_entry->nie_hash_entry.nhe_id = disk_inode->ndi_id;
         inode_entry->nie_hash_entry.nhe_flash_loc =
-                              nffs_flash_loc(area_idx, area_offset);
-        inode_entry->nie_last_block_entry = NULL; /* for now */
+            nffs_flash_loc(area_idx, area_offset);
 
         nffs_hash_insert(&inode_entry->nie_hash_entry);
     }
 
-    /*
-     * inode object has been restored and the entry is in the hash
-     * Check whether the lastblock and parent have also been restored
-     * and link up or allocate dummy entries as appropriate.
-     */
     if (do_add) {
         inode_entry->nie_refcnt = 1;
 
-        if (disk_inode->ndi_flags & NFFS_INODE_FLAG_DELETED) {
-            /*
-             * Restore this inode even though deleted on disk
-             * so the additional restored blocks have a place to go
-             */
-            NFFS_LOG(DEBUG, "restoring deleted inode %x\n",
-                     (unsigned int)disk_inode->ndi_id);
-            nffs_inode_setflags(inode_entry, NFFS_INODE_FLAG_DELETED);
-        }
-
-        /*
-         * Inode has a lastblock on disk.
-         * Add reference to last block entry if in hash table
-         * otherwise add a dummy block entry for later update
-         */
-        if (disk_inode->ndi_lastblock_id != NFFS_ID_NONE &&
-                nffs_hash_id_is_file(inode_entry->nie_hash_entry.nhe_id)) {
-            lastblock_entry =
-              nffs_hash_find_block(disk_inode->ndi_lastblock_id);
-
-            /*
-             * Lastblock has already been restored.
-             */
-            if (lastblock_entry != NULL) {
-                if (lastblock_entry->nhe_id == disk_inode->ndi_lastblock_id) {
-                    inode_entry->nie_last_block_entry = lastblock_entry;
-                }
-
-            } else {
-                /*
-                 * Insert a temporary reference to a 'dummy' block entry
-                 * When block is restored, it will update this dummy and
-                 * the entry of this inode is updated to flash location
-                 */
-                rc = nffs_block_entry_reserve(&lastblock_entry);
-                if (lastblock_entry == NULL) {
-                    rc = FS_ENOMEM;
-                    goto err;
-                }
-
-                lastblock_entry->nhe_id = disk_inode->ndi_lastblock_id;
-                lastblock_entry->nhe_flash_loc = NFFS_FLASH_LOC_NONE;
-                inode_entry->nie_last_block_entry = lastblock_entry;
-                nffs_inode_setflags(inode_entry, NFFS_INODE_FLAG_DUMMYLSTBLK);
-                nffs_hash_insert(lastblock_entry);
-
-                if (lastblock_entry->nhe_id >= nffs_hash_next_block_id) {
-                    nffs_hash_next_block_id = lastblock_entry->nhe_id + 1;
-                }
-            }
-        }
-
         if (disk_inode->ndi_parent_id != NFFS_ID_NONE) {
-            
             parent = nffs_hash_find_inode(disk_inode->ndi_parent_id);
-            /*
-             * The parent directory for this inode hasn't been restored yet.
-             * Add a dummy directory so it can be added as a child.
-             * When the parent inode is restored, it's hash entry will be
-             * updated with the flash location.
-             */
             if (parent == NULL) {
                 rc = nffs_restore_dummy_inode(disk_inode->ndi_parent_id,
                                              &parent);
-                /*
-                 * Set the dummy parent flag in the new parent.
-                 * It's turned off above when restored.
-                 */
-                nffs_inode_setflags(parent, NFFS_INODE_FLAG_DUMMYPARENT);
                 if (rc != 0) {
                     goto err;
                 }
@@ -700,21 +547,21 @@ nffs_restore_inode(const struct nffs_disk_inode *disk_inode, uint8_t area_idx,
             }
         } 
 
+
         if (inode_entry->nie_hash_entry.nhe_id == NFFS_ID_ROOT_DIR) {
             nffs_root_dir = inode_entry;
-            nffs_inode_setflags(nffs_root_dir, NFFS_INODE_FLAG_INTREE);
         }
     }
 
     if (nffs_hash_id_is_file(inode_entry->nie_hash_entry.nhe_id)) {
         NFFS_LOG(DEBUG, "restoring file; id=0x%08x\n",
-                 (unsigned int)inode_entry->nie_hash_entry.nhe_id);
+                 inode_entry->nie_hash_entry.nhe_id);
         if (inode_entry->nie_hash_entry.nhe_id >= nffs_hash_next_file_id) {
             nffs_hash_next_file_id = inode_entry->nie_hash_entry.nhe_id + 1;
         }
     } else {
         NFFS_LOG(DEBUG, "restoring dir; id=0x%08x\n",
-                 (unsigned int)inode_entry->nie_hash_entry.nhe_id);
+                 inode_entry->nie_hash_entry.nhe_id);
         if (inode_entry->nie_hash_entry.nhe_id >= nffs_hash_next_dir_id) {
             nffs_hash_next_dir_id = inode_entry->nie_hash_entry.nhe_id + 1;
         }
@@ -752,22 +599,16 @@ nffs_restore_block_gets_replaced(const struct nffs_block *old_block,
 {
     assert(old_block->nb_hash_entry->nhe_id == disk_block->ndb_id);
 
-    if (nffs_block_is_dummy(old_block->nb_hash_entry)) {
-        assert(0);
+    if (old_block->nb_seq < disk_block->ndb_seq) {
         *out_should_replace = 1;
         return 0;
     }
 
-    if (old_block->nb_seq < disk_block->ndb_seq) {
-        *out_should_replace = 2;
-        return 0;
-    }
-
     if (old_block->nb_seq == disk_block->ndb_seq) {
-        /* This is a duplicate of an previously-read block.  This should never
+        /* This is a duplicate of an previously-read inode.  This should never
          * happen.
          */
-        return FS_EEXIST;
+        return FS_ECORRUPT;
     }
 
     *out_should_replace = 0;
@@ -807,39 +648,12 @@ nffs_restore_block(const struct nffs_disk_block *disk_block, uint8_t area_idx,
 
     entry = nffs_hash_find_block(disk_block->ndb_id);
     if (entry != NULL) {
-
         rc = nffs_block_from_hash_entry_no_ptrs(&block, entry);
-        if (rc != 0 && rc != FS_ENOENT) {
+        if (rc != 0) {
             goto err;
         }
 
-        /*
-         * If the old block reference is for a 'dummy' block, it was added
-         * because the owning inode's lastblock was not yet restored.
-         * Update the block hash entry and inode to reference the entry.
-         */
-        if (nffs_block_is_dummy(entry)) {
-
-            assert(entry->nhe_id == disk_block->ndb_id);
-
-            /*
-             * Entry is no longer dummy as it references the correct location
-             */
-            entry->nhe_flash_loc = nffs_flash_loc(area_idx, area_offset);
-
-            inode_entry = nffs_hash_find_inode(disk_block->ndb_inode_id);
-
-            /*
-             * Turn off flags in previously restored inode recording the
-             * allocation of a dummy block
-             */
-            if (inode_entry) {
-                nffs_inode_unsetflags(inode_entry, NFFS_INODE_FLAG_DUMMYLSTBLK);
-            }
-        }
-
-        rc = nffs_restore_block_gets_replaced(&block, disk_block,
-                                              &do_replace);
+        rc = nffs_restore_block_gets_replaced(&block, disk_block, &do_replace);
         if (rc != 0) {
             goto err;
         }
@@ -849,28 +663,24 @@ nffs_restore_block(const struct nffs_disk_block *disk_block, uint8_t area_idx,
             return 0;
         }
 
-        /*
-         * update the existing hash entry to reference the new flash location
-         */
-        entry->nhe_flash_loc = nffs_flash_loc(area_idx, area_offset);
+        nffs_block_delete_from_ram(entry);
+    }
 
-    } else {
-        entry = nffs_block_entry_alloc();
-        if (entry == NULL) {
-            rc = FS_ENOMEM;
-            goto err;
-        }
-        new_block = 1;
-        entry->nhe_id = disk_block->ndb_id;
-        entry->nhe_flash_loc = nffs_flash_loc(area_idx, area_offset);
+    entry = nffs_block_entry_alloc();
+    if (entry == NULL) {
+        rc = FS_ENOMEM;
+        goto err;
+    }
+    new_block = 1;
+    entry->nhe_id = disk_block->ndb_id;
+    entry->nhe_flash_loc = nffs_flash_loc(area_idx, area_offset);
 
-        /* The block is ready to be inserted into the hash. */
+    /* The block is ready to be inserted into the hash. */
 
-        nffs_hash_insert(entry);
+    nffs_hash_insert(entry);
 
-        if (disk_block->ndb_id >= nffs_hash_next_block_id) {
-            nffs_hash_next_block_id = disk_block->ndb_id + 1;
-        }
+    if (disk_block->ndb_id >= nffs_hash_next_block_id) {
+        nffs_hash_next_block_id = disk_block->ndb_id + 1;
     }
 
     /* Make sure the maximum block data size is not set lower than the size of
@@ -881,40 +691,18 @@ nffs_restore_block(const struct nffs_disk_block *disk_block, uint8_t area_idx,
     }
 
     NFFS_LOG(DEBUG, "restoring block; id=0x%08x seq=%u inode_id=%u prev_id=%u "
-             "data_len=%u\n",
-             (unsigned int)disk_block->ndb_id,
-             (unsigned int)disk_block->ndb_seq,
-             (unsigned int)disk_block->ndb_inode_id,
-             (unsigned int)disk_block->ndb_prev_id,
+             "data_len=%u\n", disk_block->ndb_id, disk_block->ndb_seq,
+             disk_block->ndb_inode_id, disk_block->ndb_prev_id,
              disk_block->ndb_data_len);
 
     inode_entry = nffs_hash_find_inode(disk_block->ndb_inode_id);
-
     if (inode_entry == NULL) {
-        /*
-         * Owning inode not yet restored.
-         * Allocate a dummy inode which temporarily owns this block.
-         * It is not yet linked to a parent.
-         */
         rc = nffs_restore_dummy_inode(disk_block->ndb_inode_id, &inode_entry);
         if (rc != 0) {
             goto err;
         }
-        /*
-         * Record that this inode was created because a block was restored
-         * before the inode
-         */
-        nffs_inode_setflags(inode_entry, NFFS_INODE_FLAG_DUMMYINOBLK);
-        inode_entry->nie_last_block_entry = entry;
-    } else {
-        if (nffs_inode_getflags(inode_entry, NFFS_INODE_FLAG_DELETED)) {
-            /*
-             * don't restore blocks for deleted inodes
-             */
-            rc = FS_ENOENT;
-            goto err;
-        }
     }
+
 
     return 0;
 
@@ -952,6 +740,7 @@ nffs_restore_object(const struct nffs_disk_object *disk_object)
         break;
 
     default:
+        assert(0);
         rc = FS_EINVAL;
         break;
     }
@@ -973,26 +762,38 @@ static int
 nffs_restore_disk_object(int area_idx, uint32_t area_offset,
                          struct nffs_disk_object *out_disk_object)
 {
+    uint32_t magic;
     int rc;
 
-    rc = nffs_flash_read(area_idx, area_offset,
-                         &out_disk_object->ndo_un_obj,
-                         sizeof(out_disk_object->ndo_un_obj));
+    rc = nffs_flash_read(area_idx, area_offset, &magic, sizeof magic);
     if (rc != 0) {
         return rc;
     }
 
-    if (nffs_hash_id_is_inode(out_disk_object->ndo_disk_inode.ndi_id)) {
+    switch (magic) {
+    case NFFS_INODE_MAGIC:
         out_disk_object->ndo_type = NFFS_OBJECT_TYPE_INODE;
+        rc = nffs_inode_read_disk(area_idx, area_offset,
+                                 &out_disk_object->ndo_disk_inode);
+        break;
 
-    } else if (nffs_hash_id_is_block(out_disk_object->ndo_disk_block.ndb_id)) {
+    case NFFS_BLOCK_MAGIC:
         out_disk_object->ndo_type = NFFS_OBJECT_TYPE_BLOCK;
+        rc = nffs_block_read_disk(area_idx, area_offset,
+                                 &out_disk_object->ndo_disk_block);
+        break;
 
-    } else if (out_disk_object->ndo_disk_block.ndb_id == NFFS_ID_NONE) {
-        return FS_EEMPTY;
+    case 0xffffffff:
+        rc = FS_EEMPTY;
+        break;
 
-    } else {
-        return FS_ECORRUPT;
+    default:
+        rc = FS_ECORRUPT;
+        break;
+    }
+
+    if (rc != 0) {
+        return rc;
     }
 
     out_disk_object->ndo_area_idx = area_idx;
@@ -1046,29 +847,13 @@ nffs_restore_area_contents(int area_idx)
         rc = nffs_restore_disk_object(area_idx, area->na_cur,  &disk_object);
         switch (rc) {
         case 0:
-
             /* Valid object; restore it into the RAM representation. */
-            rc = nffs_restore_object(&disk_object);
-
-            /*
-             * If the restore fails the CRC check, the object length field
-             * can't be trusted so just start looking for the next valid
-             * object in the flash area.
-             * XXX Deal with file system corruption
-             */
-            if (rc == FS_ECORRUPT) {
-                area->na_cur++;
-            } else {
-                nffs_object_count++; /* total count of restored objects */
-                area->na_cur += nffs_restore_disk_object_size(&disk_object);
-            }
+            nffs_restore_object(&disk_object);
+            area->na_cur += nffs_restore_disk_object_size(&disk_object);
             break;
 
         case FS_ECORRUPT:
-            /*
-             * Invalid object; keep scanning for a valid object ID and CRC
-             * Can nffs_restore_disk_object return FS_ECORRUPT? XXX
-             */
+            /* Invalid object; keep scanning for a valid magic number. */
             area->na_cur++;
             break;
 
@@ -1109,10 +894,6 @@ nffs_restore_detect_one_area(uint8_t flash_id, uint32_t area_offset,
 
     if (!nffs_area_magic_is_set(out_disk_area)) {
         return FS_ECORRUPT;
-    }
-
-    if (!nffs_area_is_current_version(out_disk_area)) {
-        return FS_EUNEXP;
     }
 
     return 0;
@@ -1169,7 +950,7 @@ nffs_restore_corrupt_scratch(void)
                     }
                 } else {
                     inode_entry = (struct nffs_inode_entry *)entry;
-                    nffs_inode_setflags(inode_entry, NFFS_INODE_FLAG_OBSOLETE);
+                    inode_entry->nie_refcnt = 0;
                 }
             }
 
@@ -1213,55 +994,42 @@ nffs_log_contents(void)
     NFFS_HASH_FOREACH(entry, i, next) {
         if (nffs_hash_id_is_block(entry->nhe_id)) {
             rc = nffs_block_from_hash_entry(&block, entry);
-            assert(rc == 0 || rc == FS_ENOENT);
-            NFFS_LOG(DEBUG, "block; id=%u inode_id=",
-                     (unsigned int)entry->nhe_id);
+            assert(rc == 0);
+            NFFS_LOG(DEBUG, "block; id=%u inode_id=", entry->nhe_id);
             if (block.nb_inode_entry == NULL) {
                 NFFS_LOG(DEBUG, "null ");
             } else {
                 NFFS_LOG(DEBUG, "%u ",
-                     (unsigned int)block.nb_inode_entry->nie_hash_entry.nhe_id);
+                         block.nb_inode_entry->nie_hash_entry.nhe_id);
             }
 
             NFFS_LOG(DEBUG, "prev_id=");
             if (block.nb_prev == NULL) {
                 NFFS_LOG(DEBUG, "null ");
             } else {
-                NFFS_LOG(DEBUG, "%u ", (unsigned int)block.nb_prev->nhe_id);
+                NFFS_LOG(DEBUG, "%u ", block.nb_prev->nhe_id);
             }
 
             NFFS_LOG(DEBUG, "data_len=%u\n", block.nb_data_len);
         } else {
             inode_entry = (void *)entry;
             rc = nffs_inode_from_entry(&inode, inode_entry);
-            if (rc == FS_ENOENT) {
-                NFFS_LOG(DEBUG, "DUMMY file; id=%x ref=%d block_id=",
-                         (unsigned int)entry->nhe_id, inode_entry->nie_refcnt);
-                if (inode_entry->nie_last_block_entry == NULL) {
-                    NFFS_LOG(DEBUG, "null");
-                } else {
-                    NFFS_LOG(DEBUG, "%x",
-                     (unsigned int)inode_entry->nie_last_block_entry->nhe_id);
-                }
-            } else if (rc != 0) {
-                continue;
-            }
-            /*assert(rc == 0);*/
+            assert(rc == 0);
 
             if (nffs_hash_id_is_file(entry->nhe_id)) {
                 NFFS_LOG(DEBUG, "file; id=%u name=%.3s block_id=",
-                         (unsigned int)entry->nhe_id, inode.ni_filename);
+                         entry->nhe_id, inode.ni_filename);
                 if (inode_entry->nie_last_block_entry == NULL) {
                     NFFS_LOG(DEBUG, "null");
                 } else {
                     NFFS_LOG(DEBUG, "%u",
-                     (unsigned int)inode_entry->nie_last_block_entry->nhe_id);
+                             inode_entry->nie_last_block_entry->nhe_id);
                 }
                 NFFS_LOG(DEBUG, "\n");
             } else {
                 inode_entry = (void *)entry;
-                NFFS_LOG(DEBUG, "dir; id=%u name=%.3s\n",
-                         (unsigned int)entry->nhe_id, inode.ni_filename);
+                NFFS_LOG(DEBUG, "dir; id=%u name=%.3s\n", entry->nhe_id,
+                         inode.ni_filename);
 
             }
         }
@@ -1296,7 +1064,6 @@ nffs_restore_full(const struct nffs_area_desc *area_descs)
         return rc;
     }
     nffs_restore_largest_block_data_len = 0;
-    nffs_current_area_descs = (struct nffs_area_desc*) area_descs;
 
     /* Read each area from flash. */
     for (i = 0; area_descs[i].nad_length != 0; i++) {
@@ -1313,7 +1080,6 @@ nffs_restore_full(const struct nffs_area_desc *area_descs)
             use_area = 1;
             break;
 
-        case FS_EUNEXP:    /* not formatted with current on-disk NFFS format */
         case FS_ECORRUPT:
             use_area = 0;
             break;
@@ -1389,6 +1155,9 @@ nffs_restore_full(const struct nffs_area_desc *area_descs)
     if (rc != 0) {
         goto err;
     }
+
+    /* Find the last block in each file inode. */
+    nffs_restore_find_file_ends();
 
     /* Delete from RAM any objects that were invalidated when subsequent areas
      * were restored.

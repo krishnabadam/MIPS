@@ -33,7 +33,6 @@ struct nffs_area *nffs_areas;
 uint8_t nffs_num_areas;
 uint8_t nffs_scratch_area_idx;
 uint16_t nffs_block_max_data_sz;
-struct nffs_area_desc *nffs_current_area_descs;
 
 struct os_mempool nffs_file_pool;
 struct os_mempool nffs_dir_pool;
@@ -116,14 +115,6 @@ nffs_unlock(void)
 
     rc = os_mutex_release(&nffs_mutex);
     assert(rc == 0 || rc == OS_NOT_STARTED);
-}
-
-static void
-nffs_stats_init(void)
-{
-    nffs_hashcnt_ins = 0;
-    nffs_hashcnt_rm = 0;
-    nffs_object_count = 0;
 }
 
 /**
@@ -631,8 +622,6 @@ nffs_init(void)
     nffs_config_init();
 
     nffs_cache_clear();
-
-    nffs_stats_init();
 
     rc = os_mutex_init(&nffs_mutex);
     if (rc != 0) {

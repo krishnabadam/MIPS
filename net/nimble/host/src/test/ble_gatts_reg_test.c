@@ -30,12 +30,6 @@
 struct ble_gatts_reg_test_entry {
     uint8_t op;
     uint8_t uuid128[16];
-    uint16_t handle;
-    uint16_t val_handle; /* If a characteristic. */
-
-    const struct ble_gatt_svc_def *svc;
-    const struct ble_gatt_chr_def *chr;
-    const struct ble_gatt_dsc_def *dsc;
 };
 
 static struct ble_gatts_reg_test_entry
@@ -51,7 +45,8 @@ ble_gatts_reg_test_init(void)
 }
 
 static void
-ble_gatts_reg_test_misc_reg_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
+ble_gatts_reg_test_misc_reg_cb(uint8_t op, union ble_gatt_register_ctxt *ctxt,
+                               void *arg)
 {
     struct ble_gatts_reg_test_entry *entry;
 
@@ -59,30 +54,19 @@ ble_gatts_reg_test_misc_reg_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
                       BLE_GATTS_REG_TEST_MAX_ENTRIES);
 
     entry = ble_gatts_reg_test_entries + ble_gatts_reg_test_num_entries++;
-    memset(entry, 0, sizeof *entry);
 
-    entry->op = ctxt->op;
-    switch (ctxt->op) {
+    entry->op = op;
+    switch (op) {
     case BLE_GATT_REGISTER_OP_SVC:
-        memcpy(entry->uuid128, ctxt->svc.svc_def->uuid128, 16);
-        entry->handle = ctxt->svc.handle;
-        entry->svc = ctxt->svc.svc_def;
+        memcpy(entry->uuid128, ctxt->svc_reg.svc->uuid128, 16);
         break;
 
     case BLE_GATT_REGISTER_OP_CHR:
-        memcpy(entry->uuid128, ctxt->chr.chr_def->uuid128, 16);
-        entry->handle = ctxt->chr.def_handle;
-        entry->val_handle = ctxt->chr.val_handle;
-        entry->svc = ctxt->chr.svc_def;
-        entry->chr = ctxt->chr.chr_def;
+        memcpy(entry->uuid128, ctxt->chr_reg.chr->uuid128, 16);
         break;
 
     case BLE_GATT_REGISTER_OP_DSC:
-        memcpy(entry->uuid128, ctxt->dsc.dsc_def->uuid128, 16);
-        entry->handle = ctxt->dsc.handle;
-        entry->svc = ctxt->dsc.svc_def;
-        entry->chr = ctxt->dsc.chr_def;
-        entry->dsc = ctxt->dsc.dsc_def;
+        memcpy(entry->uuid128, ctxt->dsc_reg.dsc->uuid128, 16);
         break;
 
     default:
@@ -92,174 +76,7 @@ ble_gatts_reg_test_misc_reg_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
 }
 
 static void
-ble_gatts_reg_test_misc_lookup_good(struct ble_gatts_reg_test_entry *entry)
-{
-    uint16_t chr_def_handle;
-    uint16_t chr_val_handle;
-    uint16_t svc_handle;
-    uint16_t dsc_handle;
-    int rc;
-
-    switch (entry->op) {
-    case BLE_GATT_REGISTER_OP_SVC:
-        rc = ble_gatts_find_svc(entry->uuid128, &svc_handle);
-        TEST_ASSERT_FATAL(rc == 0);
-        TEST_ASSERT(svc_handle == entry->handle);
-        break;
-
-    case BLE_GATT_REGISTER_OP_CHR:
-        rc = ble_gatts_find_chr(entry->svc->uuid128, entry->chr->uuid128,
-                                &chr_def_handle, &chr_val_handle);
-        TEST_ASSERT_FATAL(rc == 0);
-        TEST_ASSERT(chr_def_handle == entry->handle);
-        TEST_ASSERT(chr_val_handle == entry->val_handle);
-        break;
-
-    case BLE_GATT_REGISTER_OP_DSC:
-        rc = ble_gatts_find_dsc(entry->svc->uuid128, entry->chr->uuid128,
-                                entry->dsc->uuid128, &dsc_handle);
-        break;
-
-    default:
-        TEST_ASSERT(0);
-        break;
-    }
-}
-
-static void
-ble_gatts_reg_test_misc_lookup_bad(struct ble_gatts_reg_test_entry *entry)
-{
-    struct ble_gatts_reg_test_entry *cur;
-    uint8_t wrong_uuid[16];
-    int rc;
-    int i;
-
-    switch (entry->op) {
-    case BLE_GATT_REGISTER_OP_SVC:
-        /* Wrong service UUID. */
-        memcpy(wrong_uuid, entry->svc->uuid128, 16);
-        wrong_uuid[15]++;
-        rc = ble_gatts_find_svc(wrong_uuid, NULL);
-        TEST_ASSERT(rc == BLE_HS_ENOENT);
-        break;
-
-    case BLE_GATT_REGISTER_OP_CHR:
-        /* Correct service UUID, wrong characteristic UUID. */
-        memcpy(wrong_uuid, entry->chr->uuid128, 16);
-        wrong_uuid[15]++;
-        rc = ble_gatts_find_chr(entry->svc->uuid128, wrong_uuid, NULL, NULL);
-        TEST_ASSERT(rc == BLE_HS_ENOENT);
-
-        /* Incorrect service UUID, correct characteristic UUID. */
-        memcpy(wrong_uuid, entry->svc->uuid128, 16);
-        wrong_uuid[15]++;
-        rc = ble_gatts_find_chr(wrong_uuid, entry->chr->uuid128, NULL, NULL);
-        TEST_ASSERT(rc == BLE_HS_ENOENT);
-
-        /* Existing (but wrong) service, correct characteristic UUID. */
-        for (i = 0; i < ble_gatts_reg_test_num_entries; i++) {
-            cur = ble_gatts_reg_test_entries + i;
-            switch (cur->op) {
-            case BLE_GATT_REGISTER_OP_SVC:
-                if (cur->svc != entry->svc) {
-                    rc = ble_gatts_find_chr(cur->svc->uuid128,
-                                            entry->chr->uuid128,
-                                            NULL, NULL);
-                    TEST_ASSERT(rc == BLE_HS_ENOENT);
-                }
-                break;
-
-            case BLE_GATT_REGISTER_OP_CHR:
-                /* Characteristic that isn't in this service. */
-                if (cur->svc != entry->svc) {
-                    rc = ble_gatts_find_chr(entry->svc->uuid128,
-                                            cur->chr->uuid128,
-                                            NULL, NULL);
-                    TEST_ASSERT(rc == BLE_HS_ENOENT);
-                }
-                break;
-
-            case BLE_GATT_REGISTER_OP_DSC:
-                /* Use descriptor UUID instead of characteristic UUID. */
-                rc = ble_gatts_find_chr(entry->svc->uuid128,
-                                        cur->dsc->uuid128,
-                                        NULL, NULL);
-                TEST_ASSERT(rc == BLE_HS_ENOENT);
-                break;
-
-            default:
-                TEST_ASSERT(0);
-                break;
-            }
-        }
-        break;
-
-    case BLE_GATT_REGISTER_OP_DSC:
-        /* Correct svc/chr UUID, wrong dsc UUID. */
-        memcpy(wrong_uuid, entry->dsc->uuid128, 16);
-        wrong_uuid[15]++;
-        rc = ble_gatts_find_dsc(entry->svc->uuid128, entry->chr->uuid128,
-                                wrong_uuid, NULL);
-        TEST_ASSERT(rc == BLE_HS_ENOENT);
-
-        /* Incorrect svc UUID, correct chr/dsc UUID. */
-        memcpy(wrong_uuid, entry->svc->uuid128, 16);
-        wrong_uuid[15]++;
-        rc = ble_gatts_find_dsc(wrong_uuid, entry->chr->uuid128,
-                                entry->dsc->uuid128, NULL);
-        TEST_ASSERT(rc == BLE_HS_ENOENT);
-
-        for (i = 0; i < ble_gatts_reg_test_num_entries; i++) {
-            cur = ble_gatts_reg_test_entries + i;
-            switch (cur->op) {
-            case BLE_GATT_REGISTER_OP_SVC:
-                /* Existing (but wrong) svc, correct chr/dsc UUID. */
-                if (cur->svc != entry->svc) {
-                    rc = ble_gatts_find_dsc(cur->svc->uuid128,
-                                            entry->chr->uuid128,
-                                            entry->dsc->uuid128,
-                                            NULL);
-                    TEST_ASSERT(rc == BLE_HS_ENOENT);
-                }
-                break;
-
-            case BLE_GATT_REGISTER_OP_CHR:
-                /* Existing (but wrong) svc/chr, correct dsc UUID. */
-                if (cur->chr != entry->chr) {
-                    rc = ble_gatts_find_dsc(cur->svc->uuid128,
-                                            cur->chr->uuid128,
-                                            entry->dsc->uuid128,
-                                            NULL);
-                    TEST_ASSERT(rc == BLE_HS_ENOENT);
-                }
-                break;
-
-            case BLE_GATT_REGISTER_OP_DSC:
-                /* Descriptor that isn't in this characteristic. */
-                if (cur->chr != entry->chr) {
-                    rc = ble_gatts_find_dsc(cur->svc->uuid128,
-                                            cur->chr->uuid128,
-                                            entry->dsc->uuid128,
-                                            NULL);
-                    TEST_ASSERT(rc == BLE_HS_ENOENT);
-                }
-                break;
-
-            default:
-                TEST_ASSERT(0);
-                break;
-            }
-        }
-        break;
-
-    default:
-        TEST_ASSERT(0);
-        break;
-    }
-}
-
-static void
-ble_gatts_reg_test_misc_verify_entry(uint8_t op, const uint8_t *uuid128)
+ble_gatts_reg_test_misc_verify_entry(uint8_t op, uint8_t *uuid128)
 {
     struct ble_gatts_reg_test_entry *entry;
     int i;
@@ -267,31 +84,17 @@ ble_gatts_reg_test_misc_verify_entry(uint8_t op, const uint8_t *uuid128)
     for (i = 0; i < ble_gatts_reg_test_num_entries; i++) {
         entry = ble_gatts_reg_test_entries + i;
         if (entry->op == op && memcmp(entry->uuid128, uuid128, 16) == 0) {
-            break;
+            return;
         }
     }
-    TEST_ASSERT_FATAL(entry != NULL);
 
-    /* Verify that characteristic value handle was properly assigned at
-     * registration.
-     */
-    if (op == BLE_GATT_REGISTER_OP_CHR) {
-        TEST_ASSERT(*entry->chr->val_handle == entry->val_handle);
-    }
-
-    /* Verify that the entry can be looked up. */
-    ble_gatts_reg_test_misc_lookup_good(entry);
-
-    /* Verify that "barely incorrect" UUID information doesn't retrieve any
-     * handles.
-     */
-    ble_gatts_reg_test_misc_lookup_bad(entry);
+    TEST_ASSERT(0);
 }
 
 static int
 ble_gatts_reg_test_misc_dummy_access(uint16_t conn_handle,
-                                     uint16_t attr_handle,
-                                     struct ble_gatt_access_ctxt *ctxt,
+                                     uint16_t attr_handle, uint8_t op,
+                                     union ble_gatt_access_ctxt *ctxt,
                                      void *arg)
 {
     return 0;
@@ -301,8 +104,9 @@ TEST_CASE(ble_gatts_reg_test_svc_return)
 {
     int rc;
 
-    /*** Missing UUID. */
     ble_gatts_reg_test_init();
+
+    /*** Missing UUID. */
     struct ble_gatt_svc_def svcs_no_uuid[] = { {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
     }, {
@@ -313,7 +117,6 @@ TEST_CASE(ble_gatts_reg_test_svc_return)
     TEST_ASSERT(rc == BLE_HS_EINVAL);
 
     /*** Circular dependency. */
-    ble_gatts_reg_test_init();
     struct ble_gatt_svc_def svcs_circ[] = { {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid128 = BLE_UUID16(0x1234),
@@ -330,7 +133,6 @@ TEST_CASE(ble_gatts_reg_test_svc_return)
     TEST_ASSERT(rc == BLE_HS_EINVAL);
 
     /*** Success. */
-    ble_gatts_reg_test_init();
     struct ble_gatt_svc_def svcs_good[] = { {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid128 = BLE_UUID16(0x1234),
@@ -350,8 +152,9 @@ TEST_CASE(ble_gatts_reg_test_chr_return)
 {
     int rc;
 
-    /*** Missing callback. */
     ble_gatts_reg_test_init();
+
+    /*** Missing callback. */
     struct ble_gatt_svc_def svcs_no_chr_cb[] = { {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid128 = BLE_UUID16(0x1234),
@@ -369,7 +172,6 @@ TEST_CASE(ble_gatts_reg_test_chr_return)
     TEST_ASSERT(rc == BLE_HS_EINVAL);
 
     /*** Success. */
-    ble_gatts_reg_test_init();
     struct ble_gatt_svc_def svcs_good[] = { {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid128 = BLE_UUID16(0x1234),
@@ -392,8 +194,9 @@ TEST_CASE(ble_gatts_reg_test_dsc_return)
 {
     int rc;
 
-    /*** Missing callback. */
     ble_gatts_reg_test_init();
+
+    /*** Missing callback. */
     struct ble_gatt_svc_def svcs_no_dsc_cb[] = { {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid128 = BLE_UUID16(0x1234),
@@ -418,7 +221,6 @@ TEST_CASE(ble_gatts_reg_test_dsc_return)
     TEST_ASSERT(rc == BLE_HS_EINVAL);
 
     /*** Success. */
-    ble_gatts_reg_test_init();
     struct ble_gatt_svc_def svcs_good[] = { {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid128 = BLE_UUID16(0x1234),
@@ -447,9 +249,9 @@ TEST_CASE(ble_gatts_reg_test_dsc_return)
 static void
 ble_gatts_reg_test_misc_svcs(struct ble_gatt_svc_def *svcs)
 {
-    const struct ble_gatt_svc_def *svc;
-    const struct ble_gatt_chr_def *chr;
-    const struct ble_gatt_dsc_def *dsc;
+    struct ble_gatt_svc_def *svc;
+    struct ble_gatt_chr_def *chr;
+    struct ble_gatt_dsc_def *dsc;
     int rc;
 
     ble_gatts_reg_test_init();
@@ -535,8 +337,6 @@ TEST_CASE(ble_gatts_reg_test_svc_cb)
 
 TEST_CASE(ble_gatts_reg_test_chr_cb)
 {
-    uint16_t val_handles[16];
-
     /*** 1 characteristic. */
     ble_gatts_reg_test_misc_svcs((struct ble_gatt_svc_def[]) { {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -545,7 +345,6 @@ TEST_CASE(ble_gatts_reg_test_chr_cb)
             .uuid128 = BLE_UUID16(0x1111),
             .access_cb = ble_gatts_reg_test_misc_dummy_access,
             .flags = BLE_GATT_CHR_F_READ,
-            .val_handle = val_handles + 0,
         }, {
             0
         } },
@@ -561,12 +360,10 @@ TEST_CASE(ble_gatts_reg_test_chr_cb)
             .uuid128 = BLE_UUID16(0x1111),
             .access_cb = ble_gatts_reg_test_misc_dummy_access,
             .flags = BLE_GATT_CHR_F_READ,
-            .val_handle = val_handles + 0,
         }, {
             .uuid128 = BLE_UUID16(0x2222),
             .access_cb = ble_gatts_reg_test_misc_dummy_access,
             .flags = BLE_GATT_CHR_F_WRITE,
-            .val_handle = val_handles + 1,
         }, {
             0
         } },
@@ -577,7 +374,6 @@ TEST_CASE(ble_gatts_reg_test_chr_cb)
             .uuid128 = BLE_UUID16(0x3333),
             .access_cb = ble_gatts_reg_test_misc_dummy_access,
             .flags = BLE_GATT_CHR_F_READ,
-            .val_handle = val_handles + 2,
         }, {
             0
         } },
@@ -588,8 +384,6 @@ TEST_CASE(ble_gatts_reg_test_chr_cb)
 
 TEST_CASE(ble_gatts_reg_test_dsc_cb)
 {
-    uint16_t val_handles[16];
-
     /*** 1 descriptor. */
     ble_gatts_reg_test_misc_svcs((struct ble_gatt_svc_def[]) { {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -598,9 +392,8 @@ TEST_CASE(ble_gatts_reg_test_dsc_cb)
             .uuid128 = BLE_UUID16(0x1111),
             .access_cb = ble_gatts_reg_test_misc_dummy_access,
             .flags = BLE_GATT_CHR_F_READ,
-            .val_handle = val_handles + 0,
             .descriptors = (struct ble_gatt_dsc_def[]) { {
-                .uuid128 = BLE_UUID16(0x111a),
+                .uuid128 = BLE_UUID16(0xaaaa),
                 .att_flags = 5,
                 .access_cb = ble_gatts_reg_test_misc_dummy_access,
             }, {
@@ -613,7 +406,7 @@ TEST_CASE(ble_gatts_reg_test_dsc_cb)
         0
     } });
 
-    /*** 5+ descriptors. */
+    /*** 5 descriptors. */
     ble_gatts_reg_test_misc_svcs((struct ble_gatt_svc_def[]) { {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid128 = BLE_UUID16(0x1234),
@@ -621,9 +414,8 @@ TEST_CASE(ble_gatts_reg_test_dsc_cb)
             .uuid128 = BLE_UUID16(0x1111),
             .access_cb = ble_gatts_reg_test_misc_dummy_access,
             .flags = BLE_GATT_CHR_F_READ,
-            .val_handle = val_handles + 0,
             .descriptors = (struct ble_gatt_dsc_def[]) { {
-                .uuid128 = BLE_UUID16(0x111a),
+                .uuid128 = BLE_UUID16(0xaaaa),
                 .att_flags = 5,
                 .access_cb = ble_gatts_reg_test_misc_dummy_access,
             }, {
@@ -633,7 +425,6 @@ TEST_CASE(ble_gatts_reg_test_dsc_cb)
             .uuid128 = BLE_UUID16(0x2222),
             .access_cb = ble_gatts_reg_test_misc_dummy_access,
             .flags = BLE_GATT_CHR_F_WRITE,
-            .val_handle = val_handles + 1,
         }, {
             0
         } },
@@ -644,45 +435,20 @@ TEST_CASE(ble_gatts_reg_test_dsc_cb)
             .uuid128 = BLE_UUID16(0x3333),
             .access_cb = ble_gatts_reg_test_misc_dummy_access,
             .flags = BLE_GATT_CHR_F_READ,
-            .val_handle = val_handles + 2,
             .descriptors = (struct ble_gatt_dsc_def[]) { {
-                .uuid128 = BLE_UUID16(0x333a),
+                .uuid128 = BLE_UUID16(0xaaab),
                 .att_flags = 5,
                 .access_cb = ble_gatts_reg_test_misc_dummy_access,
             }, {
-                .uuid128 = BLE_UUID16(0x333b),
+                .uuid128 = BLE_UUID16(0xaaac),
                 .att_flags = 5,
                 .access_cb = ble_gatts_reg_test_misc_dummy_access,
             }, {
-                .uuid128 = BLE_UUID16(0x333c),
+                .uuid128 = BLE_UUID16(0xaaad),
                 .att_flags = 5,
                 .access_cb = ble_gatts_reg_test_misc_dummy_access,
             }, {
-                .uuid128 = BLE_UUID16(0x333e),
-                .att_flags = 5,
-                .access_cb = ble_gatts_reg_test_misc_dummy_access,
-            }, {
-                0
-            } },
-        }, {
-            .uuid128 = BLE_UUID16(0x4444),
-            .access_cb = ble_gatts_reg_test_misc_dummy_access,
-            .flags = BLE_GATT_CHR_F_READ,
-            .val_handle = val_handles + 3,
-            .descriptors = (struct ble_gatt_dsc_def[]) { {
-                .uuid128 = BLE_UUID16(0x444a),
-                .att_flags = 5,
-                .access_cb = ble_gatts_reg_test_misc_dummy_access,
-            }, {
-                .uuid128 = BLE_UUID16(0x444b),
-                .att_flags = 5,
-                .access_cb = ble_gatts_reg_test_misc_dummy_access,
-            }, {
-                .uuid128 = BLE_UUID16(0x444c),
-                .att_flags = 5,
-                .access_cb = ble_gatts_reg_test_misc_dummy_access,
-            }, {
-                .uuid128 = BLE_UUID16(0x444e),
+                .uuid128 = BLE_UUID16(0xaaae),
                 .att_flags = 5,
                 .access_cb = ble_gatts_reg_test_misc_dummy_access,
             }, {
@@ -698,8 +464,6 @@ TEST_CASE(ble_gatts_reg_test_dsc_cb)
 
 TEST_SUITE(ble_gatts_reg_suite)
 {
-    tu_suite_set_post_test_cb(ble_hs_test_util_post_test, NULL);
-
     ble_gatts_reg_test_svc_return();
     ble_gatts_reg_test_chr_return();
     ble_gatts_reg_test_dsc_return();

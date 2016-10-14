@@ -97,9 +97,6 @@ int ble_phy_tx(struct os_mbuf *txpdu, uint8_t end_trans);
 /* Place the PHY into receive mode */
 int ble_phy_rx(void);
 
-/* Copies the received PHY buffer into the allocated pdu */
-void ble_phy_rxpdu_copy(uint8_t *dptr, struct os_mbuf *rxpdu);
-
 /* Get an RSSI reading */
 int ble_phy_rssi_get(void);
 
@@ -141,11 +138,5 @@ void ble_phy_encrypt_disable(void);
 
 /* Set the packet counters and dir used by LE encyption */
 void ble_phy_encrypt_set_pkt_cntr(uint64_t pkt_counter, int dir);
-
-/* Enable phy resolving list */
-void ble_phy_resolv_list_enable(void);
-
-/* Disable phy resolving list */
-void ble_phy_resolv_list_disable(void);
 
 #endif /* H_BLE_PHY_ */

@@ -22,7 +22,6 @@
 
 #include "stats/stats.h"
 #include "hal/hal_cputime.h"
-#include "os/os_eventq.h"
 #include "nimble/nimble_opt.h"
 
 /* Controller revision. */
@@ -76,12 +75,6 @@ struct ble_ll_obj
     /* Packet transmit queue */
     struct os_event ll_tx_pkt_ev;
     struct ble_ll_pkt_q ll_tx_pkt_q;
-
-    /* Data buffer overflow event */
-    struct os_event ll_dbuf_overflow_ev;
-
-    /* HW error callout */
-    struct os_callout_func ll_hw_err_timer;
 };
 extern struct ble_ll_obj g_ble_ll_data;
 
@@ -92,7 +85,6 @@ STATS_SECT_START(ble_ll_stats)
     STATS_SECT_ENTRY(hci_events_sent)
     STATS_SECT_ENTRY(bad_ll_state)
     STATS_SECT_ENTRY(bad_acl_hdr)
-    STATS_SECT_ENTRY(no_bufs)
     STATS_SECT_ENTRY(rx_adv_pdu_crc_ok)
     STATS_SECT_ENTRY(rx_adv_pdu_crc_err)
     STATS_SECT_ENTRY(rx_adv_bytes_crc_ok)
@@ -136,7 +128,6 @@ extern STATS_SECT_DECL(ble_ll_stats) ble_ll_stats;
 #define BLE_LL_EVENT_CONN_SPVN_TMO  (OS_EVENT_T_PERUSER + 4)
 #define BLE_LL_EVENT_CONN_EV_END    (OS_EVENT_T_PERUSER + 5)
 #define BLE_LL_EVENT_TX_PKT_IN      (OS_EVENT_T_PERUSER + 6)
-#define BLE_LL_EVENT_DBUF_OVERFLOW  (OS_EVENT_T_PERUSER + 7)
 
 /* LL Features */
 #define BLE_LL_FEAT_LE_ENCRYPTION   (0x01)
@@ -308,7 +299,7 @@ int ble_ll_is_valid_random_addr(uint8_t *addr);
 uint16_t ble_ll_pdu_tx_time_get(uint16_t len);
 
 /* Is this address a resolvable private address? */
-int ble_ll_is_rpa(uint8_t *addr, uint8_t addr_type);
+int ble_ll_is_resolvable_priv_addr(uint8_t *addr);
 
 /* Is 'addr' our device address? 'addr_type' is public (0) or random (!=0) */
 int ble_ll_is_our_devaddr(uint8_t *addr, int addr_type);
@@ -320,30 +311,13 @@ int ble_ll_is_our_devaddr(uint8_t *addr, int addr_type);
  */
 void ble_ll_acl_data_in(struct os_mbuf *txpkt);
 
-/**
- * Allocate a pdu (chain) for reception.
- *
- * @param len Length of PDU. This includes the PDU header as well as payload.
- * Does not include MIC if encrypted.
- *
- * @return struct os_mbuf* Pointer to mbuf chain to hold received packet
- */
-struct os_mbuf *ble_ll_rxpdu_alloc(uint16_t len);
-
-/* Tell the Link Layer there has been a data buffer overflow */
-void ble_ll_data_buffer_overflow(void);
-
-/* Tell the link layer there has been a hardware error */
-void ble_ll_hw_error(void);
-
 /*--- PHY interfaces ---*/
-struct ble_mbuf_hdr;
-
 /* Called by the PHY when a packet has started */
-int ble_ll_rx_start(uint8_t *rxbuf, uint8_t chan, struct ble_mbuf_hdr *hdr);
+int ble_ll_rx_start(struct os_mbuf *rxpdu, uint8_t chan);
 
 /* Called by the PHY when a packet reception ends */
-int ble_ll_rx_end(uint8_t *rxbuf, struct ble_mbuf_hdr *rxhdr);
+struct ble_mbuf_hdr;
+int ble_ll_rx_end(struct os_mbuf *rxpdu, struct ble_mbuf_hdr *ble_hdr);
 
 /*--- Controller API ---*/
 void ble_ll_mbuf_init(struct os_mbuf *m, uint8_t pdulen, uint8_t hdr);
@@ -356,9 +330,6 @@ uint8_t ble_ll_state_get(void);
 
 /* Send an event to LL task */
 void ble_ll_event_send(struct os_event *ev);
-
-/* Hand received pdu's to LL task  */
-void ble_ll_rx_pdu_in(struct os_mbuf *rxpdu);
 
 /* Set random address */
 int ble_ll_set_random_addr(uint8_t *addr);
@@ -383,7 +354,6 @@ int ble_ll_chk_txrx_time(uint16_t time);
 int ble_ll_rand_init(void);
 void ble_ll_rand_sample(uint8_t rnum);
 int ble_ll_rand_data_get(uint8_t *buf, uint8_t len);
-void ble_ll_rand_prand_get(uint8_t *prand);
 int ble_ll_rand_start(void);
 
 /*
@@ -411,7 +381,6 @@ int ble_ll_rand_start(void);
 #define BLE_LL_LOG_ID_CONN_END          (30)
 #define BLE_LL_LOG_ID_ADV_TXBEG         (50)
 #define BLE_LL_LOG_ID_ADV_TXDONE        (60)
-#define BLE_LL_LOG_ID_SCHED             (80)
 
 #ifdef BLE_LL_LOG
 void ble_ll_log(uint8_t id, uint8_t arg8, uint16_t arg16, uint32_t arg32);

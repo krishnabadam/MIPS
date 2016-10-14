@@ -20,8 +20,6 @@
 #include "os/os.h"
 #include "os_priv.h"
 
-#include <hal/hal_bsp.h>
-
 #ifdef __APPLE__
 #define _XOPEN_SOURCE
 #endif
@@ -404,7 +402,7 @@ os_arch_os_init(void)
     mypid = getpid();
     g_current_task = NULL;
 
-    STAILQ_INIT(&g_os_task_list);
+    TAILQ_INIT(&g_os_task_list);
     TAILQ_INIT(&g_os_run_list);
     TAILQ_INIT(&g_os_sleep_list);
 
@@ -419,7 +417,7 @@ os_arch_os_init(void)
     os_init_idle_task();
     os_sanity_task_init(1);
 
-    bsp_init();
+    os_bsp_init();
 
     return OS_OK;
 }

@@ -51,11 +51,6 @@
 /* Offset (in bytes) of advertising address in connect request */
 #define BLE_LL_CONN_REQ_ADVA_OFF    (BLE_LL_PDU_HDR_LEN + BLE_DEV_ADDR_LEN)
 
-/* Default authenticated payload timeout (30 seconds; in 10 msecs increments) */
-#define BLE_LL_CONN_DEF_AUTH_PYLD_TMO       (3000)
-#define BLE_LL_CONN_AUTH_PYLD_OS_TMO(x)     \
-    ((((uint32_t)(x)) * 10 * OS_TICKS_PER_SEC) / 1000)
-
 /* Global Link Layer connection parameters */
 struct ble_ll_conn_global_params
 {
@@ -81,9 +76,6 @@ extern struct ble_ll_conn_free_list g_ble_ll_conn_free_list;
 /* Pointer to connection state machine we are trying to create */
 extern struct ble_ll_conn_sm *g_ble_ll_conn_create_sm;
 
-extern struct os_mempool g_ble_ll_hci_ev_pool;
-
-
 /* Generic interface */
 struct ble_ll_len_req;
 struct hci_create_conn;
@@ -100,7 +92,7 @@ void ble_ll_conn_datalen_update(struct ble_ll_conn_sm *connsm,
                                 struct ble_ll_len_req *req);
 
 /* Advertising interface */
-int ble_ll_conn_slave_start(uint8_t *rxbuf, uint32_t conn_req_end, uint8_t pat);
+int ble_ll_conn_slave_start(uint8_t *rxbuf, uint32_t conn_req_end);
 
 /* Link Layer interface */
 void ble_ll_conn_module_init(void);
@@ -109,12 +101,11 @@ void ble_ll_conn_module_reset(void);
 void ble_ll_conn_event_end(void *arg);
 void ble_ll_conn_tx_pkt_in(struct os_mbuf *om, uint16_t handle, uint16_t len);
 void ble_ll_conn_spvn_timeout(void *arg);
-int ble_ll_conn_rx_isr_start(struct ble_mbuf_hdr *rxhdr, uint32_t aa);
-int ble_ll_conn_rx_isr_end(uint8_t *rxbuf, struct ble_mbuf_hdr *rxhdr);
+void ble_ll_conn_rx_isr_start(void);
+int ble_ll_conn_rx_isr_end(struct os_mbuf *rxpdu, uint32_t aa);
 void ble_ll_conn_rx_data_pdu(struct os_mbuf *rxpdu, struct ble_mbuf_hdr *hdr);
 void ble_ll_init_rx_pkt_in(uint8_t *rxbuf, struct ble_mbuf_hdr *ble_hdr);
-int ble_ll_init_rx_isr_end(uint8_t *rxbuf, uint8_t crcok,
-                           struct ble_mbuf_hdr *ble_hdr);
+int ble_ll_init_rx_isr_end(struct os_mbuf *rxpdu, uint8_t crcok);
 void ble_ll_conn_wfr_timer_exp(void);
 int ble_ll_conn_is_lru(struct ble_ll_conn_sm *s1, struct ble_ll_conn_sm *s2);
 uint32_t ble_ll_conn_get_ce_end_time(void);
@@ -124,7 +115,6 @@ uint8_t ble_ll_conn_calc_used_chans(uint8_t *chmap);
 /* HCI */
 void ble_ll_disconn_comp_event_send(struct ble_ll_conn_sm *connsm,
                                     uint8_t reason);
-void ble_ll_auth_pyld_tmo_event_send(struct ble_ll_conn_sm *connsm);
 int ble_ll_conn_hci_disconnect_cmd(uint8_t *cmdbuf);
 int ble_ll_conn_hci_rd_rem_ver_cmd(uint8_t *cmdbuf);
 int ble_ll_conn_create(uint8_t *cmdbuf);
@@ -132,9 +122,8 @@ int ble_ll_conn_hci_update(uint8_t *cmdbuf);
 int ble_ll_conn_hci_set_chan_class(uint8_t *cmdbuf);
 int ble_ll_conn_hci_param_reply(uint8_t *cmdbuf, int negative_reply);
 int ble_ll_conn_create_cancel(void);
-void ble_ll_conn_num_comp_pkts_event_send(struct ble_ll_conn_sm *connsm);
-void ble_ll_conn_comp_event_send(struct ble_ll_conn_sm *connsm, uint8_t status,
-                                 uint8_t *evbuf);
+void ble_ll_conn_num_comp_pkts_event_send(void);
+void ble_ll_conn_comp_event_send(struct ble_ll_conn_sm *connsm, uint8_t status);
 void ble_ll_conn_timeout(struct ble_ll_conn_sm *connsm, uint8_t ble_err);
 int ble_ll_conn_hci_chk_conn_params(uint16_t itvl_min, uint16_t itvl_max,
                                     uint16_t latency, uint16_t spvn_tmo);
@@ -146,17 +135,4 @@ int ble_ll_conn_hci_set_data_len(uint8_t *cmdbuf, uint8_t *rspbuf,
                                  uint8_t *rsplen);
 int ble_ll_conn_hci_le_start_encrypt(uint8_t *cmdbuf);
 int ble_ll_conn_hci_le_ltk_reply(uint8_t *cmdbuf, uint8_t *rspbuf, uint8_t ocf);
-int ble_ll_conn_hci_wr_auth_pyld_tmo(uint8_t *cmdbuf, uint8_t *rsp,
-                                     uint8_t *rsplen);
-int ble_ll_conn_hci_rd_auth_pyld_tmo(uint8_t *cmdbuf, uint8_t *rsp,
-                                     uint8_t *rsplen);
-#if (BLE_LL_CFG_FEAT_LE_PING == 1)
-void ble_ll_conn_auth_pyld_timer_start(struct ble_ll_conn_sm *connsm);
-#else
-#define ble_ll_conn_auth_pyld_timer_start(x)
-#endif
-
-int ble_ll_hci_cmd_rx(uint8_t *cmd, void *arg);
-int ble_ll_hci_acl_rx(struct os_mbuf *om, void *arg);
-
 #endif /* H_BLE_LL_CONN_PRIV_ */

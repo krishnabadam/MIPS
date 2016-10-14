@@ -40,8 +40,6 @@
 #undef MBEDTLS_SELF_TEST
 #endif
 
-#define MBEDTLS_SHA256_SMALLER		/* comes with performance hit */
-
 /**
  * \name SECTION: Module configuration options
  *

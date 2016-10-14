@@ -55,12 +55,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+typedef uint32_t os_time_t;
+
 #ifndef UINT32_MAX
 #define UINT32_MAX  0xFFFFFFFFU
 #endif
-
-typedef uint32_t os_time_t;
-#define OS_TIME_MAX UINT32_MAX
  
 /* Used to wait forever for events and mutexs */
 #define OS_TIMEOUT_NEVER    (UINT32_MAX)
@@ -106,6 +105,5 @@ struct os_timezone {
 int os_settimeofday(struct os_timeval *utctime, struct os_timezone *tz);
 int os_gettimeofday(struct os_timeval *utctime, struct os_timezone *tz);
 int64_t os_get_uptime_usec(void);
-int os_time_ms_to_ticks(uint32_t ms, uint32_t *out_ticks);
 
 #endif /* _OS_TIME_H */

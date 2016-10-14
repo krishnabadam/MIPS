@@ -6,7 +6,7 @@
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- *
+ * 
  *  http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing,
@@ -19,11 +19,8 @@
 
 #include "os/os.h"
 #include "os/os_arch.h"
-#include <hal/hal_bsp.h>
 #include <hal/hal_os_tick.h>
 #include <bsp/cmsis_nvic.h>
-
-#include "os_priv.h"
 
 /*
  * From HAL_CM0.s
@@ -217,13 +214,20 @@ os_arch_os_init(void)
         }
 
         /* Call bsp related OS initializations */
-        bsp_init();
+        os_bsp_init();
 
         /* Set the PendSV interrupt exception priority to the lowest priority */
         NVIC_SetPriority(PendSV_IRQn, PEND_SV_PRIO);
 
         /* Set the SVC interrupt to priority 0 (highest configurable) */
         NVIC_SetPriority(SVCall_IRQn, SVC_PRIO);
+
+        /*
+         * Set the os environment. This will set stack pointers and, based
+         * on the contents of os_flags, will determine if the tasks run in
+         * priviliged or un-privileged mode.
+         */
+        os_set_env();
 
         /* Check if privileged or not */
         if ((__get_CONTROL() & 1) == 0) {
@@ -268,25 +272,16 @@ static inline void svc_os_arch_start(void)
 }
 
 /**
- * Start the OS. First check to see if we are running with the correct stack
- * pointer set (PSP) and privilege mode (PRIV).
- *
- * @return os_error_t
+ * Start the OS. First check to see if we are running with the correct stack 
+ * pointer set (PSP) and privilege mode (PRIV). 
+ * 
+ * 
+ * @return os_error_t 
  */
 os_error_t
 os_arch_os_start(void)
 {
     os_error_t err;
-
-    /*
-     * Set the os environment. This will set stack pointers and, based
-     * on the contents of os_flags, will determine if the tasks run in
-     * priviliged or un-privileged mode.
-     *
-     * We switch to using "empty" part of idle task's stack until
-     * the svc_os_arch_start() executes SVC, and we will never return.
-     */
-    os_set_env(g_idle_task.t_stackptr - 1);
 
     err = OS_ERR_IN_ISR;
     if (__get_IPSR() == 0) {
@@ -308,7 +303,7 @@ os_arch_os_start(void)
             err = OS_ERR_PRIV;
             break;
         case 0x02:
-            /*
+            /* 
              * We are running in Privileged Thread mode w/SP = PSP but we
              * are supposed to be un-privileged.
              */
@@ -317,7 +312,7 @@ os_arch_os_start(void)
             }
             break;
         case 0x03:
-            /*
+            /* 
              * We are running in Unprivileged Thread mode w/SP = PSP but we
              * are supposed to be privileged.
              */
