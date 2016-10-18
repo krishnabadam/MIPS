@@ -27,8 +27,8 @@
 #include "nimble/nimble_opt.h"
 #include "nimble/hci_common.h"
 #include "nimble/hci_transport.h"
-/* XXX: For now, put this here */
-#define FILE_NAME "/home/krishnab/bt_nimble_p4/ensigma/sw/connectivity/whisper/DEV/BASE/bt/support/HCI_TRANSPORT/source/bash/topDevice"
+
+#define FILE_NAME "/dev/ttyHS0"
 
 /* Need to move these to a header file */
 #define H4_CMD                   1

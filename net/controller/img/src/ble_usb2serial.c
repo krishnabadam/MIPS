@@ -26,7 +26,8 @@
 struct os_task bletiny_ll_task;
 bssnz_t os_stack_t bletiny_ll_stack[BLETINY_LL_STACK_SIZE];
 extern int ble_hs_rx_data(struct os_mbuf *om);
-#define FILE_NAME "/home/krishnab/bt_nimble_p4/ensigma/sw/connectivity/whisper/DEV/BASE/bt/support/HCI_TRANSPORT/source/bash/topDevice"
+
+#define FILE_NAME "/dev/ttyHS0"
 
 int gFd;
 
