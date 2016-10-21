@@ -19,12 +19,12 @@
 #define H4_ACL                   2
 #define H4_EVENT                 4
 
-#define BLETINY_LL_TASK_PRIO              1
-#define BLETINY_LL_STACK_SIZE             (OS_STACK_ALIGN(288))
+#define BLE_IMG_LL_TASK_PRIO              1
+#define BLE_IMG_LL_STACK_SIZE             (OS_STACK_ALIGN(288))
 
 
-struct os_task bletiny_ll_task;
-bssnz_t os_stack_t bletiny_ll_stack[BLETINY_LL_STACK_SIZE];
+struct os_task ble_img_ll_task;
+bssnz_t os_stack_t ble_img_ll_stack[BLE_IMG_LL_STACK_SIZE];
 extern int ble_hs_rx_data(struct os_mbuf *om);
 
 #define FILE_NAME "/dev/ttyHS0"
@@ -37,7 +37,7 @@ int gFd;
  * @param arg
  */
 static void
-bletiny_ll_task_handler(void *arg)
+ble_img_ll_task_handler(void *arg)
 {
 
     int noBytes = 0;
@@ -95,9 +95,9 @@ bletiny_ll_task_handler(void *arg)
 int ble_ll_init(uint8_t ll_task_prio, uint8_t num_acl_pkts, uint16_t acl_pkt_size)
 {
 
-   os_task_init(&bletiny_ll_task, "bletiny_ll", bletiny_ll_task_handler,
+   os_task_init(&ble_img_ll_task, "ble_img_ll", ble_img_ll_task_handler,
                  NULL, 2, OS_WAIT_FOREVER,
-                 bletiny_ll_stack, BLETINY_LL_STACK_SIZE);
+                 ble_img_ll_stack, BLE_IMG_LL_STACK_SIZE);
    return 0;
 }
 
