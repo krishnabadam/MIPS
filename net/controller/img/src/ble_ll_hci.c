@@ -98,7 +98,7 @@ ble_hci_transport_host_acl_data_send(struct os_mbuf *om)
        printf("\n\n");
     }
     fd = open(FILE_NAME, O_WRONLY, S_IWUSR | S_IRUSR);
-    noBytes = write(fd,(void *)tcmd, sizeBytes);
+    noBytes = write(fd,(void *)&tcmd, sizeBytes);
     os_mbuf_free_chain(om);
     printf("Tx :  NO OF BYTES written %d\n", noBytes);
     close(fd);
