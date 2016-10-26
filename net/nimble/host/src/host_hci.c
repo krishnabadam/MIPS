@@ -463,10 +463,19 @@ host_hci_rx_le_conn_parm_req(uint8_t subevent, uint8_t *data, int len)
 int
 host_hci_set_buf_size(uint16_t pktlen, uint8_t max_pkts)
 {
+#if 0
     if (pktlen == 0 || max_pkts == 0) {
         return BLE_HS_EINVAL;
     }
+#endif
 
+/* Temporary for CSR dongle */
+    if (pktlen == 0 || max_pkts == 0) {
+       host_hci_buffer_sz = 310;
+       host_hci_max_pkts = 10;
+
+       return 0;
+    }
     host_hci_buffer_sz = pktlen;
     host_hci_max_pkts = max_pkts;
 
