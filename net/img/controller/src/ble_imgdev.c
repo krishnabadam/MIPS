@@ -5,9 +5,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-//#include "bsp/bsp.h"
-//#include "log/log.h"
-//#include "stats/stats.h"
 #include "os/os.h"
 #include "bsp/bsp.h"
 
@@ -56,24 +53,32 @@ ble_img_ll_task_handler(void *arg)
        fcntl(fd, F_SETFL, flags & (~O_NONBLOCK));
        noBytes = read(fd, &opCode, sizeof(opCode));
 
+#ifdef DEBUG_ENABLE
        printf("No. of Bytes read from Device %d \n",noBytes);
        printf("RECVD EVENT VALUE %x\n", opCode[0]);
+#endif
 
        if(opCode[0] == H4_ACL)
        {
+#ifdef DEBUG_ENABLE
           printf("acl Data RECEIVED\n");
+#endif
           om = os_msys_get_pkthdr(0, 0);
           if(om != NULL)
           {
              rc = os_mbuf_copyinto(om, 0, opCode + 1, noBytes - 1);
              if(!rc)
                 ble_hs_rx_data(om);
+#ifdef DEBUG_ENABLE
              else
                 printf("ACL DATA copy to MBUF FAILED \n");
+#endif
           }
           else
           {
+#ifdef DEBUG_ENABLE
              printf("ACL BUFFER ALLOCATION FAILED \n");
+#endif
              assert(om == 0);
           }
        }
